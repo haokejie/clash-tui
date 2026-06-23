@@ -269,7 +269,7 @@ fn clash_tui_package_emits_online_bootstrap_and_omits_sidecar_install_script() {
         &fs::read_to_string(out_dir.join(REAL_PACKAGE_NAME).join("manifest.json")).expect("read manifest"),
     )
     .expect("parse manifest");
-    assert_eq!(manifest["versions"], json!({ "app": "2.5.1" }));
+    assert_eq!(manifest["versions"], json!({ "app": "2.5.2" }));
     assert!(manifest["mihomo"]["version"].is_string());
     let _ = fs::remove_dir_all(tmp_dir);
 }
@@ -382,7 +382,7 @@ fn create_package_fixture(stale_bootstrap: bool, dirty: bool) -> PackageFixture 
         "gitDirty": dirty,
         "target": "x86_64-unknown-linux-gnu",
         "dockerPlatform": "linux/amd64",
-        "versions": { "app": "2.5.1" },
+        "versions": { "app": "2.5.2" },
         "clashTui": { "binary": "clash-tui", "sha256": sha256(&package_dir.join("clash-tui")).expect("clash-tui sha256") },
         "mihomo": {
             "binary": "resources/mihomo",
