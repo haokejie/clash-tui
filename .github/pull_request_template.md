@@ -5,7 +5,8 @@
 ## Validation
 
 - [ ] `cargo xtask ci`
-- [ ] Package build and verifier passed, if packaging or installer behavior changed
+- [ ] `target/debug/clash-tui --help` smoke passed, if CLI/TUI entry behavior changed
+- [ ] Package build and verifier passed, if packaging, installer, or release behavior changed
 
 ## Risk
 

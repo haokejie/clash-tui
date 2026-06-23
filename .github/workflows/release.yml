@@ -1,44 +1,49 @@
-name: Release
+name: CD
 
 on:
   workflow_dispatch:
     inputs:
       target:
-        description: Rust target triple to package
+        description: Package target to build
         required: true
-        default: x86_64-unknown-linux-gnu
+        default: all
         type: choice
         options:
+          - all
           - x86_64-unknown-linux-gnu
           - aarch64-unknown-linux-gnu
+      publish:
+        description: Publish artifacts to the current tag's GitHub Release
+        required: true
+        default: false
+        type: boolean
   push:
     tags:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: cd-${{ github.ref }}
   cancel-in-progress: false
 
-jobs:
-  package:
-    name: Package
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
 
-    env:
-      TARGET: ${{ github.event.inputs.target || 'x86_64-unknown-linux-gnu' }}
+jobs:
+  validate:
+    name: Validate Before Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Setup Rust
+      - name: Setup Rust Toolchain
         shell: bash
         run: |
           set -euo pipefail
@@ -48,30 +53,105 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Cache Cargo
+      - name: Cache Cargo State
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-release-${{ env.TARGET }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          key: ${{ runner.os }}-release-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
-            ${{ runner.os }}-release-${{ env.TARGET }}-
+            ${{ runner.os }}-release-cargo-
             ${{ runner.os }}-cargo-
 
-      - name: Build Package
-        env:
-          CARGO_HTTP_TIMEOUT: "600"
-          CARGO_HTTP_MULTIPLEXING: "false"
-          CLASH_TUI_PACKAGE_REQUIRE_CLEAN: "1"
-        run: cargo xtask package --target "$TARGET"
-
-      - name: Verify Package
+      - name: Install cargo-deny
         shell: bash
         run: |
           set -euo pipefail
-          head_commit="$(git rev-parse HEAD)"
+          cargo install cargo-deny --version 0.19.9 --locked
+
+      - name: Run Project CI
+        env:
+          CLASH_TUI_REQUIRE_CARGO_DENY: "1"
+        run: cargo xtask ci
+
+  package:
+    name: Package ${{ matrix.target }}
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+
+    steps:
+      - name: Select Target
+        id: select
+        shell: bash
+        env:
+          REQUESTED_TARGET: ${{ inputs.target || 'all' }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          selected=0
+          if [[ "$GITHUB_EVENT_NAME" == "push" || "$REQUESTED_TARGET" == "all" || "$REQUESTED_TARGET" == "$TARGET" ]]; then
+            selected=1
+          fi
+          echo "selected=$selected" >>"$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: steps.select.outputs.selected == '1'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Docker Buildx
+        if: steps.select.outputs.selected == '1'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Setup Rust Toolchain
+        if: steps.select.outputs.selected == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain"
+          rustup default "$toolchain"
+          rustc --version
+          cargo --version
+
+      - name: Cache Package Inputs
+        if: steps.select.outputs.selected == '1'
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/clash-tui-cargo-cache
+            target/clash-tui-download-cache
+          key: ${{ runner.os }}-package-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml', 'packaging/clash-tui/Dockerfile') }}
+          restore-keys: |
+            ${{ runner.os }}-package-${{ matrix.target }}-
+            ${{ runner.os }}-package-
+
+      - name: Build Package
+        if: steps.select.outputs.selected == '1'
+        env:
+          CARGO_HTTP_MULTIPLEXING: "false"
+          CARGO_HTTP_TIMEOUT: "600"
+          CLASH_TUI_PACKAGE_REQUIRE_CLEAN: "1"
+          TARGET: ${{ matrix.target }}
+        run: cargo xtask package --target "$TARGET"
+
+      - name: Verify Package
+        if: steps.select.outputs.selected == '1'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
           case "$TARGET" in
             x86_64-unknown-linux-gnu) package_arch="x86_64" ;;
             aarch64-unknown-linux-gnu) package_arch="aarch64" ;;
@@ -81,14 +161,15 @@ jobs:
           cargo xtask verify-package \
             --archive "target/clash-tui-dist/${package_name}.tar.gz" \
             --manifest "target/clash-tui-dist/${package_name}.manifest.json" \
-            --expect-commit "$head_commit" \
+            --expect-commit "$GITHUB_SHA" \
             --require-clean-source \
             --json
 
-      - name: Upload Package
+      - name: Upload Package Artifact
+        if: steps.select.outputs.selected == '1'
         uses: actions/upload-artifact@v4
         with:
-          name: clash-tui-${{ env.TARGET }}
+          name: clash-tui-${{ matrix.target }}
           if-no-files-found: error
           retention-days: 14
           path: |
@@ -96,3 +177,52 @@ jobs:
             target/clash-tui-dist/*.tar.gz
             target/clash-tui-dist/*.tar.gz.sha256
             target/clash-tui-dist/*.manifest.json
+
+  publish:
+    name: Publish GitHub Release
+    needs: package
+    if: github.event_name == 'push' || inputs.publish == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Download Package Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            echo "::error::Publishing requires a tag ref. Push a v* tag or rerun this workflow from a tag."
+            exit 1
+          fi
+
+          shopt -s nullglob
+          files=(dist/*)
+          if (( ${#files[@]} == 0 )); then
+            echo "::error::No package artifacts were downloaded."
+            exit 1
+          fi
+
+          notes_file="$(mktemp)"
+          {
+            printf 'Automated clash-tui package release for %s.\n\n' "$GITHUB_REF_NAME"
+            printf 'Artifacts:\n'
+            for file in "${files[@]}"; do
+              printf -- '- `%s`\n' "$(basename "$file")"
+            done | sort
+          } >"$notes_file"
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$notes_file"
+          fi

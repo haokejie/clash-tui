@@ -13,20 +13,25 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
 jobs:
-  validate:
-    name: Validate
+  project-gate:
+    name: Project Gate
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: Setup Rust Toolchain
         shell: bash
         run: |
           set -euo pipefail
@@ -36,7 +41,7 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Cache Cargo
+      - name: Cache Cargo State
         uses: actions/cache@v4
         with:
           path: |
@@ -48,9 +53,22 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install cargo-deny
-        run: cargo install cargo-deny --version 0.19.9 --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-deny --version 0.19.9 --locked
 
-      - name: Validate
+      - name: Run Project CI
         env:
           CLASH_TUI_REQUIRE_CARGO_DENY: "1"
         run: cargo xtask ci
+
+      - name: Build CLI Smoke Binary
+        run: cargo build -p clash-tui
+
+      - name: Run CLI Smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          target/debug/clash-tui --help >/tmp/clash-tui-help.txt
+          grep -q "clash-tui" /tmp/clash-tui-help.txt
