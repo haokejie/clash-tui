@@ -17,7 +17,7 @@ ratatui = "0.29.0"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }
-sysinfo = { version = "0.38", features = ["network", "system"] }
+sysinfo = { version = "0.39", features = ["network", "system"] }
 tokio = { workspace = true, features = ["io-util", "net", "process"] }
 url = "2.5.7"
 
