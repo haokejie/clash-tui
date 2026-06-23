@@ -1,0 +1,56 @@
+name: 问题反馈 / Bug report
+title: '[BUG] '
+description: 反馈 clash-tui TUI/CLI 问题
+labels: ['bug']
+type: 'Bug'
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请确认问题发生在当前 clash-tui TUI/CLI 版本；本项目不提供浏览器 UI、桌面窗口或对外 HTTP/WS 管理 API。
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述 / Describe the bug
+      description: 请描述实际结果和预期结果。
+    validations:
+      required: true
+
+  - type: textarea
+    id: version
+    attributes:
+      label: 版本 / Version
+      description: 请粘贴 `clash-tui --version` 和 mihomo 版本。
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤 / To reproduce
+      description: 请列出触发问题的 CLI 命令、TUI 操作或配置步骤。
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: os
+    attributes:
+      label: 操作系统 / OS
+      options:
+        - label: Linux
+        - label: macOS
+        - label: Windows
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / Logs
+      description: 请粘贴相关 CLI 输出、`core logs` 输出或任务错误信息。不要粘贴订阅 URL、token、密钥或生产凭证。
+      render: log
+    validations:
+      required: false

@@ -1,0 +1,29 @@
+[Unit]
+Description=Clash TUI Core
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/clash-tui
+Environment=CLASH_TUI_HOME=/var/lib/clash-tui
+Environment=CLASH_TUI_RESOURCE_DIR=/opt/clash-tui/resources
+Environment=CLASH_TUI_MIHOMO_BIN=/opt/clash-tui/resources/mihomo
+EnvironmentFile=-/etc/clash-tui/env
+ExecStart=/opt/clash-tui/clash-tui core start
+ExecStop=/opt/clash-tui/clash-tui core stop
+ExecReload=/opt/clash-tui/clash-tui core restart
+User=root
+Group=root
+TimeoutStopSec=15s
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

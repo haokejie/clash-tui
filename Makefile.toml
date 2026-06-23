@@ -1,0 +1,33 @@
+[config]
+skip_core_tasks = true
+skip_git_env_info = true
+skip_rust_env_info = true
+skip_crate_env_info = true
+
+[tasks.rust-format]
+description = "Format Rust workspace"
+command = "cargo"
+args = ["fmt", "--all"]
+
+[tasks.rust-format-check]
+description = "Check Rust formatting"
+command = "cargo"
+args = ["fmt", "--all", "--check"]
+
+[tasks.clash-tui-check]
+description = "Check clash-tui"
+command = "cargo"
+args = ["check", "-p", "clash-tui"]
+
+[tasks.clash-tui-test]
+description = "Test clash-tui"
+command = "cargo"
+args = ["test", "-p", "clash-tui"]
+
+[tasks.pre-commit]
+description = "Pre-commit checks"
+dependencies = ["rust-format-check", "clash-tui-check"]
+
+[tasks.pre-push]
+description = "Pre-push checks"
+dependencies = ["rust-format-check", "clash-tui-check", "clash-tui-test"]

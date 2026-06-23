@@ -1,0 +1,43 @@
+{
+  "extends": ["config:recommended", ":disableDependencyDashboard"],
+  "baseBranchPatterns": ["dev"],
+  "enabledManagers": ["cargo", "github-actions"],
+  "labels": ["dependencies"],
+  "ignorePaths": [
+    "**/vendor/**",
+    "**/__tests__/**",
+    "**/test/**",
+    "**/tests/**",
+    "**/__fixtures__/**",
+    "shared/**"
+  ],
+  "rangeStrategy": "replace",
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["patch"],
+      "automerge": true
+    },
+    {
+      "matchPackageNames": ["*"],
+      "semanticCommitType": "chore"
+    },
+    {
+      "description": "Group all cargo dependencies into a single PR and bump Cargo.toml ranges",
+      "matchManagers": ["cargo"],
+      "groupName": "cargo dependencies",
+      "rangeStrategy": "bump"
+    },
+    {
+      "description": "Group all GitHub Actions updates into a single PR",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions"
+    }
+  ],
+  "ignoreDeps": ["criterion"],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "description": "Force update lockfile to track latest commits of git dependencies",
+    "schedule": ["* 0-4 1 * *"],
+    "automerge": true
+  }
+}

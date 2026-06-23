@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Rust target triple to package
+        required: true
+        default: x86_64-unknown-linux-gnu
+        type: choice
+        options:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      TARGET: ${{ github.event.inputs.target || 'x86_64-unknown-linux-gnu' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Setup Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --component rustfmt --component clippy
+          rustup default "$toolchain"
+          rustc --version
+          cargo --version
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-release-${{ env.TARGET }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-release-${{ env.TARGET }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Build Package
+        env:
+          CARGO_HTTP_TIMEOUT: "600"
+          CARGO_HTTP_MULTIPLEXING: "false"
+          CLASH_TUI_PACKAGE_REQUIRE_CLEAN: "1"
+        run: cargo xtask package --target "$TARGET"
+
+      - name: Verify Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_commit="$(git rev-parse HEAD)"
+          case "$TARGET" in
+            x86_64-unknown-linux-gnu) package_arch="x86_64" ;;
+            aarch64-unknown-linux-gnu) package_arch="aarch64" ;;
+            *) printf 'unsupported target: %s\n' "$TARGET" >&2; exit 1 ;;
+          esac
+          package_name="clash-tui-linux-${package_arch}"
+          cargo xtask verify-package \
+            --archive "target/clash-tui-dist/${package_name}.tar.gz" \
+            --manifest "target/clash-tui-dist/${package_name}.manifest.json" \
+            --expect-commit "$head_commit" \
+            --require-clean-source \
+            --json
+
+      - name: Upload Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: clash-tui-${{ env.TARGET }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            target/clash-tui-dist/install.sh
+            target/clash-tui-dist/*.tar.gz
+            target/clash-tui-dist/*.tar.gz.sha256
+            target/clash-tui-dist/*.manifest.json

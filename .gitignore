@@ -1,0 +1,28 @@
+.DS_Store
+*.local
+.env
+.env.*
+!.env.example
+*.secret
+*.pem
+*.key
+*.log
+secrets/
+.vscode
+.idea
+.old
+.changelog_backups
+target
+CLAUDE.md
+.vfox.toml
+.vfox/
+.claude
+AGENTS.md
+
+# Codex local task memory
+.task/
+task/
+
+# Local acceptance evidence and credentials
+.clash-tui-acceptance*
+acceptance.local/

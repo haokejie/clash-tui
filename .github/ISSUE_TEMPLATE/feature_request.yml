@@ -1,0 +1,41 @@
+name: 功能请求 / Feature request
+title: '[Feature] '
+description: 提出 clash-tui TUI/CLI 功能请求
+labels: ['enhancement']
+type: 'Feature'
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本项目当前定位是本地 TUI/CLI 控制器。浏览器 UI、桌面窗口、WebDAV、媒体解锁、延迟测试、IP 地理信息检测和对外 HTTP/WS 管理 API 默认不在范围内。
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 功能描述 / Feature description
+      description: 请说明希望新增或调整的终端/TUI/CLI 能力。
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: 使用场景 / Use case
+      description: 请描述它会改善的实际工作流。
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: target
+    attributes:
+      label: 影响范围 / Target area
+      options:
+        - label: CLI
+        - label: TUI
+        - label: mihomo controller adapter
+        - label: Profile / subscription
+        - label: TUN / system proxy platform adapter
+        - label: Packaging / deployment
+    validations:
+      required: true
