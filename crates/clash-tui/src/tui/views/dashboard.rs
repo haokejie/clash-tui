@@ -175,6 +175,15 @@ fn render_overview(area: Rect, buffer: &mut Buffer, app: &TuiApp) {
     let (owner_value, owner_detail) = core_owner_summary(app);
     lines.push(key_value_line("核心", &core_value, Some(core_state), width));
     lines.push(key_value_line("客户端", APP_VERSION_LABEL, None, width));
+    lines.push(key_value_line(
+        "终端类型",
+        &terminal_type_label(),
+        Some(format!(
+            "显示 {}",
+            crate::terminal_display::current_display_mode().label()
+        )),
+        width,
+    ));
     lines.push(key_value_line("管理方", &owner_value, owner_detail, width));
     lines.push(key_value_line(
         "实时",
@@ -193,15 +202,6 @@ fn render_overview(area: Rect, buffer: &mut Buffer, app: &TuiApp) {
     lines.push(key_value_line("订阅流量", &usage.summary, usage.profile.clone(), width));
     lines.push(progress_line("用量进度", usage.percent, width));
     lines.push(key_value_line("订阅更新", &usage.updated, None, width));
-    lines.push(key_value_line(
-        "终端类型",
-        &terminal_type_label(),
-        Some(format!(
-            "显示 {}",
-            crate::terminal_display::current_display_mode().label()
-        )),
-        width,
-    ));
 
     render_clipped_lines(area, buffer, lines);
 }

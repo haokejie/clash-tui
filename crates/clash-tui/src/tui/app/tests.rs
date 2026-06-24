@@ -452,12 +452,12 @@ async fn dashboard_renders_numbered_navigation_and_actionable_summary() {
         &[
             "核心",
             "客户端",
+            "终端类型",
             "管理方",
             "实时",
             "订阅流量",
             "用量进度",
             "订阅更新",
-            "终端类型",
         ],
     );
     assert!(rendered.contains("核心"));
