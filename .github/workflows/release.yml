@@ -41,7 +41,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Rust Toolchain
         shell: bash
@@ -54,7 +54,7 @@ jobs:
           cargo --version
 
       - name: Cache Cargo State
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -105,13 +105,13 @@ jobs:
 
       - name: Checkout
         if: steps.select.outputs.selected == '1'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Setup Docker Buildx
         if: steps.select.outputs.selected == '1'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Setup Rust Toolchain
         if: steps.select.outputs.selected == '1'
@@ -126,7 +126,7 @@ jobs:
 
       - name: Cache Package Inputs
         if: steps.select.outputs.selected == '1'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             target/clash-tui-cargo-cache
@@ -144,6 +144,18 @@ jobs:
           CLASH_TUI_PACKAGE_REQUIRE_CLEAN: "1"
           TARGET: ${{ matrix.target }}
         run: cargo xtask package --target "$TARGET"
+
+      - name: Fix Package Cache Ownership
+        if: steps.select.outputs.selected == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for cache_dir in target/clash-tui-cargo-cache target/clash-tui-download-cache; do
+            if [[ -d "$cache_dir" ]]; then
+              sudo chown -R "$(id -u):$(id -g)" "$cache_dir"
+              chmod -R u+rwX "$cache_dir"
+            fi
+          done
 
       - name: Verify Package
         if: steps.select.outputs.selected == '1'
@@ -167,7 +179,7 @@ jobs:
 
       - name: Upload Package Artifact
         if: steps.select.outputs.selected == '1'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: clash-tui-${{ matrix.target }}
           if-no-files-found: error
@@ -187,7 +199,7 @@ jobs:
 
     steps:
       - name: Download Package Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true

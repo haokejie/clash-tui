@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.2 - 2026-06-24
+
+### Changed
+
+- Updated GitHub Actions workflow actions to current major versions with Node 24 runtimes.
+- Fixed release package cache ownership after Docker builds so GitHub Actions can save package caches cleanly.
+
 ## v0.2.1 - 2026-06-24
 
 ### Changed
