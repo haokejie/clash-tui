@@ -22,7 +22,7 @@ use crate::{
 
 #[derive(Debug, Parser)]
 #[command(
-    version,
+    version = env!("CLASH_TUI_APP_VERSION"),
     about = "mihomo 本地 TUI/CLI 控制器",
     long_about = "默认不带子命令会进入中文 TUI。CLI 子命令用于脚本化管理 Core、订阅、代理、规则、连接、任务、TUN 和系统代理。",
     subcommand_help_heading = "命令",
@@ -146,6 +146,8 @@ pub enum CoreCommand {
     Stop,
     #[command(about = "重启 Core")]
     Restart,
+    #[command(about = "以前台方式运行 Core（供 systemd/supervisor 托管）")]
+    Run,
     #[command(about = "查看 Core 状态")]
     Status,
     #[command(about = "查看 Core 日志摘要")]
@@ -522,6 +524,10 @@ async fn execute_core(command: CoreCommand, state: &AppState) -> Result<CliOutpu
         CoreCommand::Start => Ok(CliOutput::data("core start", actions::core::start(state).await?)),
         CoreCommand::Stop => Ok(CliOutput::data("core stop", actions::core::stop(state).await?)),
         CoreCommand::Restart => Ok(CliOutput::data("core restart", actions::core::restart(state).await?)),
+        CoreCommand::Run => {
+            actions::core::run(state).await?;
+            Ok(CliOutput::message("core run exited"))
+        }
         CoreCommand::Status => Ok(CliOutput::data("core status", actions::core::status(state).await)),
         CoreCommand::Logs => Ok(CliOutput::data("core logs", actions::core::logs(state).await)),
     }

@@ -81,6 +81,7 @@ clash-tui
 clash-tui core status
 clash-tui core start
 clash-tui core stop
+clash-tui core run
 clash-tui mode get
 clash-tui mode set rule
 clash-tui profile list
@@ -194,14 +195,14 @@ acceptance 包装脚本默认只跑只读预检，只有传 `--yes` 才执行确
 
 ## systemd
 
-随包 unit 是本地 core 生命周期托管，不提供 Web 服务：
+随包 unit 是本地 Core 生命周期托管，不提供 Web 服务：
 
 ```bash
 sudo systemctl enable --now clash-tui.service
 sudo systemctl status clash-tui.service
 ```
 
-该 unit 使用 `core start` 启动 mihomo，`core stop` 停止 mihomo，`core restart` 用于 reload/restart。TUI 仍应在用户终端中手动启动。
+该 unit 使用 `core run` 前台运行 manager，由 systemd 真正持有 `clash-tui` 与 mihomo 进程。TUI 仍应在用户终端中手动启动；当 Core 由 systemd 管理时，TUI/CLI 的重启操作会委托给 systemd。安装脚本会先检测 `systemctl` 与 systemd 运行环境；不可用时跳过 unit，只安装二进制和资源，可用 `clash-tui core start|status|stop` 手动管理 detached Core。
 
 ## 配置
 

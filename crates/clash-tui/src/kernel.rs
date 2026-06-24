@@ -8,8 +8,11 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow};
-use clash_core::{AppPaths, IAppSettings, KernelSnapshot, KernelState, OperationStatus, RuntimeConfigGenerator};
+use clash_core::{
+    AppPaths, IAppSettings, KernelOwner, KernelSnapshot, KernelState, OperationStatus, RuntimeConfigGenerator,
+};
 use clash_mihomo::{MihomoClient as _, MihomoClientConfig, SimpleMihomoClient};
+use serde::{Deserialize, Serialize};
 use tokio::{
     process::{Child, Command},
     sync::Mutex,
@@ -28,9 +31,13 @@ const LOCAL_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const HEALTH_FAILURE_THRESHOLD: u8 = 3;
 const LOG_LIMIT: usize = 200;
 const MIHOMO_LOG_FILE: &str = "mihomo.log";
+const OWNER_FILE: &str = "mihomo-owner.json";
 const JOB_START: &str = "kernel-start";
 const JOB_STOP: &str = "kernel-stop";
 const JOB_RESTART: &str = "kernel-restart";
+pub const ENV_CORE_OWNER: &str = "CLASH_TUI_CORE_OWNER";
+pub const ENV_SERVICE_NAME: &str = "CLASH_TUI_SERVICE_NAME";
+pub const DEFAULT_SYSTEMD_SERVICE_NAME: &str = "clash-tui.service";
 
 #[derive(Debug, Clone)]
 pub struct KernelProcessConfig {
@@ -39,6 +46,7 @@ pub struct KernelProcessConfig {
     pub resource_dir: PathBuf,
     pub ipc_path: PathBuf,
     pub pid_path: PathBuf,
+    pub owner_path: PathBuf,
     pub secret: Option<String>,
 }
 
@@ -51,9 +59,19 @@ impl KernelProcessConfig {
             resource_dir: paths.resources_dir.clone(),
             ipc_path: paths.ipc_path.clone(),
             pid_path: paths.home_dir.join("mihomo.pid"),
+            owner_path: paths.home_dir.join(OWNER_FILE),
             secret,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OwnerMarker {
+    pid: u32,
+    owner: KernelOwner,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 #[derive(Clone)]
@@ -139,25 +157,35 @@ impl KernelManager {
         };
 
         if !process_exists(pid) {
-            let _ = tokio::fs::remove_file(&self.config.pid_path).await;
+            let _ = self.remove_runtime_markers().await;
             return self.stopped_snapshot().await;
         }
 
         match self.health_client.version().await {
-            Ok(version) => KernelSnapshot {
-                state: KernelState::Running,
-                pid: Some(pid),
-                version: Some(version.version),
-                last_error: None,
-                last_exit: None,
-            },
-            Err(err) => KernelSnapshot {
-                state: KernelState::Unhealthy,
-                pid: Some(pid),
-                version: None,
-                last_error: Some(err.to_string()),
-                last_exit: None,
-            },
+            Ok(version) => {
+                let (owner, owner_detail) = self.owner_for_pid(pid).await;
+                KernelSnapshot {
+                    state: KernelState::Running,
+                    owner,
+                    owner_detail,
+                    pid: Some(pid),
+                    version: Some(version.version),
+                    last_error: None,
+                    last_exit: None,
+                }
+            }
+            Err(err) => {
+                let (owner, owner_detail) = self.owner_for_pid(pid).await;
+                KernelSnapshot {
+                    state: KernelState::Unhealthy,
+                    owner,
+                    owner_detail,
+                    pid: Some(pid),
+                    version: None,
+                    last_error: Some(err.to_string()),
+                    last_exit: None,
+                }
+            }
         }
     }
 
@@ -204,25 +232,39 @@ impl KernelManager {
         }
         if let Some(snapshot) = self.external_running_snapshot().await {
             let state = snapshot.state;
+            let owner = snapshot.owner;
             self.adopt_external_snapshot(snapshot).await;
             return Ok(OperationStatus {
                 accepted: false,
                 current_job: None,
                 state,
+                owner,
+                message: Some("Core 已在运行，未重复启动".into()),
             });
         }
 
         self.set_job_state(JOB_START, KernelState::Starting, None).await;
         match self.spawn_child().await {
-            Ok((child, pid)) => {
+            Ok((mut child, pid)) => {
                 let snapshot = KernelSnapshot {
                     state: KernelState::Running,
+                    owner: KernelOwner::Detached,
+                    owner_detail: None,
                     pid,
                     version: None,
                     last_error: None,
                     last_exit: None,
                 };
-                self.write_pid_file(pid).await?;
+                if let Err(err) = self.write_pid_file(pid).await {
+                    self.cleanup_spawned_child(&mut child, pid, "failed-start").await;
+                    return Err(err);
+                }
+                if let Some(pid) = pid
+                    && let Err(err) = self.write_owner_marker(pid, KernelOwner::Detached, None).await
+                {
+                    self.cleanup_spawned_child(&mut child, Some(pid), "failed-start").await;
+                    return Err(err);
+                }
                 let mut inner = self.inner.lock().await;
                 inner.child = Some(child);
                 inner.snapshot = snapshot.clone();
@@ -234,6 +276,8 @@ impl KernelManager {
                     accepted: true,
                     current_job: None,
                     state: KernelState::Running,
+                    owner: KernelOwner::Detached,
+                    message: None,
                 })
             }
             Err(err) => {
@@ -256,6 +300,8 @@ impl KernelManager {
             accepted: true,
             current_job: None,
             state: KernelState::Stopped,
+            owner: KernelOwner::Stopped,
+            message: None,
         })
     }
 
@@ -269,15 +315,27 @@ impl KernelManager {
         self.stop_child("restarting").await?;
 
         match self.spawn_child().await {
-            Ok((child, pid)) => {
+            Ok((mut child, pid)) => {
                 let snapshot = KernelSnapshot {
                     state: KernelState::Running,
+                    owner: KernelOwner::Detached,
+                    owner_detail: None,
                     pid,
                     version: None,
                     last_error: None,
                     last_exit: None,
                 };
-                self.write_pid_file(pid).await?;
+                if let Err(err) = self.write_pid_file(pid).await {
+                    self.cleanup_spawned_child(&mut child, pid, "failed-restart").await;
+                    return Err(err);
+                }
+                if let Some(pid) = pid
+                    && let Err(err) = self.write_owner_marker(pid, KernelOwner::Detached, None).await
+                {
+                    self.cleanup_spawned_child(&mut child, Some(pid), "failed-restart")
+                        .await;
+                    return Err(err);
+                }
                 let mut inner = self.inner.lock().await;
                 inner.child = Some(child);
                 inner.snapshot = snapshot.clone();
@@ -289,11 +347,91 @@ impl KernelManager {
                     accepted: true,
                     current_job: None,
                     state: KernelState::Running,
+                    owner: KernelOwner::Detached,
+                    message: None,
                 })
             }
             Err(err) => {
                 let message = err.to_string();
                 self.set_stopped_after_failure(message.clone()).await;
+                Err(anyhow!(message))
+            }
+        }
+    }
+
+    pub async fn run_foreground(&self, owner: KernelOwner, owner_detail: Option<String>) -> Result<()> {
+        let Ok(_operation_guard) = self.operation.try_lock() else {
+            anyhow::bail!("Core 正忙，无法以前台方式启动");
+        };
+
+        self.refresh_child_exit().await;
+        if let Some(snapshot) = self.external_running_snapshot().await {
+            anyhow::bail!("Core 已在运行（owner: {:?}, pid: {:?}）", snapshot.owner, snapshot.pid);
+        }
+
+        self.set_job_state(JOB_START, KernelState::Starting, None).await;
+        let (mut child, pid) = match self.spawn_child().await {
+            Ok(result) => result,
+            Err(err) => {
+                let message = err.to_string();
+                self.set_stopped_after_failure(message.clone()).await;
+                return Err(anyhow!(message));
+            }
+        };
+        if let Err(err) = self.write_pid_file(pid).await {
+            self.cleanup_spawned_child(&mut child, pid, "failed-run").await;
+            return Err(err);
+        }
+        if let Some(pid) = pid
+            && let Err(err) = self.write_owner_marker(pid, owner, owner_detail.clone()).await
+        {
+            self.cleanup_spawned_child(&mut child, Some(pid), "failed-run").await;
+            return Err(err);
+        }
+
+        let snapshot = KernelSnapshot {
+            state: KernelState::Running,
+            owner,
+            owner_detail: owner_detail.clone(),
+            pid,
+            version: None,
+            last_error: None,
+            last_exit: None,
+        };
+        {
+            let mut inner = self.inner.lock().await;
+            inner.snapshot = snapshot.clone();
+            inner.health_failures = 0;
+            inner.current_job = None;
+        }
+        self.emit_kernel_state_changed(snapshot);
+
+        let result = wait_for_child_or_shutdown(&mut child).await;
+        match result {
+            ForegroundExit::Process(status) => {
+                let _ = self.remove_runtime_markers().await;
+                self.set_stopped(Some(status.to_string()), None).await;
+                if status.success() {
+                    Ok(())
+                } else {
+                    anyhow::bail!("mihomo exited: {status}")
+                }
+            }
+            ForegroundExit::Shutdown => {
+                if let Some(pid) = pid {
+                    self.signal_and_wait_child(&mut child, pid, "stopped").await?;
+                } else {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    self.set_stopped(Some("stopped".into()), None).await;
+                }
+                let _ = self.remove_runtime_markers().await;
+                Ok(())
+            }
+            ForegroundExit::WaitError(err) => {
+                let message = format!("failed to wait mihomo process: {err}");
+                let _ = self.remove_runtime_markers().await;
+                self.set_unhealthy(message.clone()).await;
                 Err(anyhow!(message))
             }
         }
@@ -426,7 +564,11 @@ impl KernelManager {
         };
 
         if let Some(mut child) = child {
-            let _ = child.start_kill();
+            if let Some(pid) = child.id() {
+                let _ = signal_process(pid, libc::SIGINT);
+            } else {
+                let _ = child.start_kill();
+            }
             match timeout(STOP_TIMEOUT, child.wait()).await {
                 Ok(Ok(status)) => {
                     self.set_stopped(Some(format!("{exit_message}: {status}")), None).await;
@@ -437,12 +579,25 @@ impl KernelManager {
                     return Err(anyhow!(message));
                 }
                 Err(_) => {
-                    let message = format!("timed out stopping mihomo after {}s", STOP_TIMEOUT.as_secs());
-                    self.set_unhealthy(message.clone()).await;
-                    return Err(anyhow!(message));
+                    let _ = child.start_kill();
+                    match timeout(STOP_TIMEOUT, child.wait()).await {
+                        Ok(Ok(status)) => {
+                            self.set_stopped(Some(format!("{exit_message}: {status}")), None).await;
+                        }
+                        Ok(Err(err)) => {
+                            let message = format!("failed to kill mihomo process: {err}");
+                            self.set_unhealthy(message.clone()).await;
+                            return Err(anyhow!(message));
+                        }
+                        Err(_) => {
+                            let message = format!("timed out stopping mihomo after {}s", STOP_TIMEOUT.as_secs());
+                            self.set_unhealthy(message.clone()).await;
+                            return Err(anyhow!(message));
+                        }
+                    }
                 }
             }
-            let _ = tokio::fs::remove_file(&self.config.pid_path).await;
+            let _ = self.remove_runtime_markers().await;
         } else if let Some(pid) = self.read_pid_file().await {
             self.stop_external_pid(pid, exit_message).await?;
         } else {
@@ -485,6 +640,9 @@ impl KernelManager {
             (snapshot, changed)
         };
         if changed {
+            if matches!(snapshot.state, KernelState::Crashed) {
+                let _ = self.remove_runtime_markers().await;
+            }
             self.emit_kernel_state_changed(snapshot.clone());
         }
         snapshot
@@ -519,6 +677,8 @@ impl KernelManager {
             accepted: false,
             current_job: inner.current_job.clone(),
             state: snapshot.state,
+            owner: snapshot.owner,
+            message: Some("Core 正忙，操作未接受".into()),
         }
     }
 
@@ -528,6 +688,8 @@ impl KernelManager {
             accepted,
             current_job,
             state: snapshot.state,
+            owner: snapshot.owner,
+            message: None,
         }
     }
 
@@ -549,6 +711,8 @@ impl KernelManager {
         let version = self.local_mihomo_version().await;
         let mut inner = self.inner.lock().await;
         inner.snapshot.state = KernelState::Stopped;
+        inner.snapshot.owner = KernelOwner::Stopped;
+        inner.snapshot.owner_detail = None;
         inner.snapshot.pid = None;
         inner.snapshot.version = version;
         inner.snapshot.last_exit = last_exit;
@@ -699,36 +863,134 @@ impl KernelManager {
         content.trim().parse::<u32>().ok()
     }
 
+    async fn write_owner_marker(&self, pid: u32, owner: KernelOwner, detail: Option<String>) -> Result<()> {
+        tokio::fs::create_dir_all(&self.config.home_dir)
+            .await
+            .with_context(|| format!("failed to create {}", self.config.home_dir.display()))?;
+        let marker = OwnerMarker { pid, owner, detail };
+        let content = serde_json::to_vec_pretty(&marker).context("failed to serialize mihomo owner marker")?;
+        tokio::fs::write(&self.config.owner_path, content)
+            .await
+            .with_context(|| format!("failed to write {}", self.config.owner_path.display()))
+    }
+
+    async fn read_owner_marker(&self) -> Option<OwnerMarker> {
+        let content = tokio::fs::read(&self.config.owner_path).await.ok()?;
+        serde_json::from_slice::<OwnerMarker>(&content).ok()
+    }
+
+    async fn remove_runtime_markers(&self) -> Result<()> {
+        let pid_result = tokio::fs::remove_file(&self.config.pid_path).await;
+        if let Err(err) = &pid_result
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(anyhow!(err.to_string()))
+                .with_context(|| format!("failed to remove {}", self.config.pid_path.display()));
+        }
+        let owner_result = tokio::fs::remove_file(&self.config.owner_path).await;
+        if let Err(err) = &owner_result
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(anyhow!(err.to_string()))
+                .with_context(|| format!("failed to remove {}", self.config.owner_path.display()));
+        }
+        Ok(())
+    }
+
+    async fn owner_for_pid(&self, pid: u32) -> (KernelOwner, Option<String>) {
+        if let Some(marker) = self.read_owner_marker().await
+            && marker.pid == pid
+        {
+            return (marker.owner, marker.detail);
+        }
+
+        if let Some(service_name) = detect_systemd_service(pid).await {
+            return (KernelOwner::Systemd, Some(service_name));
+        }
+
+        (KernelOwner::External, None)
+    }
+
+    async fn signal_and_wait_pid(&self, pid: u32, exit_message: &'static str) -> Result<()> {
+        if !process_exists(pid) {
+            let _ = self.remove_runtime_markers().await;
+            self.set_stopped(None, None).await;
+            return Ok(());
+        }
+
+        signal_process(pid, libc::SIGINT)?;
+        for _ in 0..50 {
+            if !process_exists(pid) {
+                let _ = self.remove_runtime_markers().await;
+                self.set_stopped(Some(format!("{exit_message}: pid {pid}")), None).await;
+                return Ok(());
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        let message = format!("timed out stopping mihomo pid {pid}");
+        self.set_unhealthy(message.clone()).await;
+        anyhow::bail!(message)
+    }
+
+    async fn signal_and_wait_child(&self, child: &mut Child, pid: u32, exit_message: &'static str) -> Result<()> {
+        signal_process(pid, libc::SIGINT)?;
+        match timeout(STOP_TIMEOUT, child.wait()).await {
+            Ok(Ok(status)) => {
+                let _ = self.remove_runtime_markers().await;
+                self.set_stopped(Some(format!("{exit_message}: {status}")), None).await;
+                Ok(())
+            }
+            Ok(Err(err)) => {
+                let message = format!("failed to wait mihomo process: {err}");
+                self.set_unhealthy(message.clone()).await;
+                Err(anyhow!(message))
+            }
+            Err(_) => {
+                let _ = child.start_kill();
+                match timeout(STOP_TIMEOUT, child.wait()).await {
+                    Ok(Ok(status)) => {
+                        let _ = self.remove_runtime_markers().await;
+                        self.set_stopped(Some(format!("{exit_message}: {status}")), None).await;
+                        Ok(())
+                    }
+                    Ok(Err(err)) => {
+                        let message = format!("failed to kill mihomo process: {err}");
+                        self.set_unhealthy(message.clone()).await;
+                        Err(anyhow!(message))
+                    }
+                    Err(_) => {
+                        let message = format!("timed out stopping mihomo after {}s", STOP_TIMEOUT.as_secs());
+                        self.set_unhealthy(message.clone()).await;
+                        Err(anyhow!(message))
+                    }
+                }
+            }
+        }
+    }
+
+    async fn cleanup_spawned_child(&self, child: &mut Child, pid: Option<u32>, exit_message: &'static str) {
+        let result = if let Some(pid) = pid {
+            self.signal_and_wait_child(child, pid, exit_message).await
+        } else {
+            let _ = child.start_kill();
+            match child.wait().await {
+                Ok(status) => {
+                    self.set_stopped(Some(format!("{exit_message}: {status}")), None).await;
+                    Ok(())
+                }
+                Err(err) => Err(anyhow!(format!("failed to wait mihomo process: {err}"))),
+            }
+        };
+        if let Err(err) = result {
+            self.set_unhealthy(err.to_string()).await;
+        }
+    }
+
     async fn stop_external_pid(&self, pid: u32, exit_message: &'static str) -> Result<()> {
         #[cfg(unix)]
         {
-            if !process_exists(pid) {
-                let _ = tokio::fs::remove_file(&self.config.pid_path).await;
-                self.set_stopped(None, None).await;
-                return Ok(());
-            }
-
-            let raw_pid = i32::try_from(pid).context("pid does not fit platform pid_t")?;
-            // SAFETY: kill is called with a pid read from a local pid file and SIGINT.
-            let result = unsafe { libc::kill(raw_pid, libc::SIGINT) };
-            if result != 0 {
-                let message = std::io::Error::last_os_error().to_string();
-                self.set_unhealthy(message.clone()).await;
-                anyhow::bail!("failed to signal mihomo pid {pid}: {message}");
-            }
-
-            for _ in 0..50 {
-                if !process_exists(pid) {
-                    let _ = tokio::fs::remove_file(&self.config.pid_path).await;
-                    self.set_stopped(Some(format!("{exit_message}: pid {pid}")), None).await;
-                    return Ok(());
-                }
-                sleep(Duration::from_millis(100)).await;
-            }
-
-            let message = format!("timed out stopping mihomo pid {pid}");
-            self.set_unhealthy(message.clone()).await;
-            anyhow::bail!(message)
+            self.signal_and_wait_pid(pid, exit_message).await
         }
 
         #[cfg(not(unix))]
@@ -741,6 +1003,47 @@ impl KernelManager {
 }
 
 const GEO_RESOURCE_FILES: &[&str] = &["Country.mmdb", "geoip.dat", "geosite.dat"];
+
+enum ForegroundExit {
+    Process(std::process::ExitStatus),
+    Shutdown,
+    WaitError(std::io::Error),
+}
+
+async fn wait_for_child_or_shutdown(child: &mut Child) -> ForegroundExit {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{Signal, SignalKind, signal};
+
+        async fn recv_signal(signal: &mut Option<Signal>) {
+            if let Some(signal) = signal {
+                let _ = signal.recv().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        }
+
+        let mut sigterm = signal(SignalKind::terminate()).ok();
+        let mut sigint = signal(SignalKind::interrupt()).ok();
+
+        tokio::select! {
+            result = child.wait() => match result {
+                Ok(status) => ForegroundExit::Process(status),
+                Err(err) => ForegroundExit::WaitError(err),
+            },
+            () = recv_signal(&mut sigterm) => ForegroundExit::Shutdown,
+            () = recv_signal(&mut sigint) => ForegroundExit::Shutdown,
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        match child.wait().await {
+            Ok(status) => ForegroundExit::Process(status),
+            Err(err) => ForegroundExit::WaitError(err),
+        }
+    }
+}
 
 pub fn controller_client_config(config: &KernelProcessConfig) -> MihomoClientConfig {
     with_secret(
@@ -779,6 +1082,41 @@ fn process_exists(pid: u32) -> bool {
         let _ = pid;
         false
     }
+}
+
+fn signal_process(pid: u32, signal: i32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let raw_pid = i32::try_from(pid).context("pid does not fit platform pid_t")?;
+        // SAFETY: kill is called with a pid read from a local pid file and a signal selected by this process.
+        let result = unsafe { libc::kill(raw_pid, signal) };
+        if result == 0 {
+            return Ok(());
+        }
+
+        let message = std::io::Error::last_os_error().to_string();
+        anyhow::bail!("failed to signal mihomo pid {pid}: {message}");
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        let _ = signal;
+        anyhow::bail!("process signaling is not implemented on this platform")
+    }
+}
+
+async fn detect_systemd_service(pid: u32) -> Option<String> {
+    let content = tokio::fs::read_to_string(format!("/proc/{pid}/cgroup")).await.ok()?;
+    for line in content.lines() {
+        let path = line.rsplit_once(':').map_or(line, |(_, path)| path);
+        for segment in path.split('/') {
+            if segment.ends_with(".service") {
+                return Some(segment.to_owned());
+            }
+        }
+    }
+    None
 }
 
 fn parse_mihomo_version_output(content: &str) -> Option<String> {
@@ -826,11 +1164,12 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    use clash_core::{AppPaths, ConfigStore, IAppSettings, KernelState, RuntimeConfigGenerator};
+    use clash_core::{AppPaths, ConfigStore, IAppSettings, KernelOwner, KernelState, RuntimeConfigGenerator};
     use clash_mihomo::ControllerEndpoint;
 
     use super::{
-        HEALTH_FAILURE_THRESHOLD, KernelManager, KernelProcessConfig, MIHOMO_LOG_FILE, controller_client_config,
+        HEALTH_FAILURE_THRESHOLD, KernelManager, KernelProcessConfig, MIHOMO_LOG_FILE, OWNER_FILE,
+        controller_client_config,
     };
 
     #[test]
@@ -844,6 +1183,7 @@ mod tests {
             resource_dir: paths.resources_dir.clone(),
             ipc_path: paths.ipc_path.clone(),
             pid_path: paths.home_dir.join("mihomo.pid"),
+            owner_path: paths.home_dir.join(OWNER_FILE),
             secret: Some("secret".into()),
         };
 
@@ -878,6 +1218,7 @@ mod tests {
                 resource_dir: paths.resources_dir.clone(),
                 ipc_path: paths.ipc_path.clone(),
                 pid_path: paths.home_dir.join("mihomo.pid"),
+                owner_path: paths.home_dir.join(OWNER_FILE),
                 secret: None,
             },
             runtime,
@@ -928,6 +1269,7 @@ mod tests {
                 resource_dir: paths.resources_dir.clone(),
                 ipc_path: missing_socket,
                 pid_path: paths.home_dir.join("mihomo.pid"),
+                owner_path: paths.home_dir.join(OWNER_FILE),
                 secret: None,
             },
             runtime,
@@ -977,6 +1319,7 @@ mod tests {
                 resource_dir: paths.resources_dir.clone(),
                 ipc_path: paths.ipc_path.clone(),
                 pid_path: paths.home_dir.join("mihomo.pid"),
+                owner_path: paths.home_dir.join(OWNER_FILE),
                 secret: None,
             },
             runtime,
@@ -1022,6 +1365,7 @@ mod tests {
             resource_dir: paths.resources_dir.clone(),
             ipc_path: root.join("missing.sock"),
             pid_path: paths.home_dir.join("mihomo.pid"),
+            owner_path: paths.home_dir.join(OWNER_FILE),
             secret: None,
         };
 
@@ -1041,6 +1385,68 @@ mod tests {
         );
 
         first.stop().await.expect("stop fake mihomo");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_foreground_writes_owner_marker_and_cleans_up() {
+        let root = temp_root("kernel-run-foreground");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create temp root");
+        let bin = fake_mihomo_bin(&root);
+
+        let paths = AppPaths::from_home(root.join("home"));
+        let loaded = ConfigStore::new(paths.clone())
+            .initialize()
+            .await
+            .expect("initialize config");
+        let runtime = RuntimeConfigGenerator::from_loaded(&loaded);
+        let config = KernelProcessConfig {
+            mihomo_bin: bin,
+            home_dir: paths.home_dir.clone(),
+            resource_dir: paths.resources_dir.clone(),
+            ipc_path: paths.ipc_path.clone(),
+            pid_path: paths.home_dir.join("mihomo.pid"),
+            owner_path: paths.home_dir.join(OWNER_FILE),
+            secret: None,
+        };
+        let pid_path = config.pid_path.clone();
+        let owner_path = config.owner_path.clone();
+        let manager = KernelManager::new(config, runtime);
+
+        let handle = tokio::spawn(async move {
+            manager
+                .run_foreground(KernelOwner::Systemd, Some("test-clash-tui.service".into()))
+                .await
+        });
+
+        for _ in 0..50 {
+            if owner_path.is_file() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        let owner_marker = fs::read_to_string(&owner_path).expect("read owner marker");
+        assert!(owner_marker.contains("\"owner\": \"systemd\""));
+        assert!(owner_marker.contains("test-clash-tui.service"));
+        let pid = fs::read_to_string(&pid_path)
+            .expect("read pid file")
+            .trim()
+            .parse::<u32>()
+            .expect("parse pid");
+
+        super::signal_process(pid, libc::SIGINT).expect("signal fake mihomo");
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("run_foreground timeout")
+            .expect("join foreground")
+            .expect("run foreground");
+
+        assert!(!pid_path.exists());
+        assert!(!owner_path.exists());
+
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1073,6 +1479,7 @@ mod tests {
                 resource_dir: paths.resources_dir.clone(),
                 ipc_path: paths.ipc_path.clone(),
                 pid_path: paths.home_dir.join("mihomo.pid"),
+                owner_path: paths.home_dir.join(OWNER_FILE),
                 secret: None,
             },
             runtime,
@@ -1124,6 +1531,7 @@ mod tests {
                 resource_dir: paths.resources_dir.clone(),
                 ipc_path: paths.ipc_path.clone(),
                 pid_path: paths.home_dir.join("mihomo.pid"),
+                owner_path: paths.home_dir.join(OWNER_FILE),
                 secret: None,
             },
             runtime,
@@ -1168,6 +1576,7 @@ mod tests {
                 resource_dir: paths.resources_dir.clone(),
                 ipc_path: paths.ipc_path.clone(),
                 pid_path: paths.home_dir.join("mihomo.pid"),
+                owner_path: paths.home_dir.join(OWNER_FILE),
                 secret: None,
             },
             runtime,

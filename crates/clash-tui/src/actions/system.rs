@@ -2,7 +2,11 @@ use anyhow::Result;
 use clash_core::{IAppSettings, KernelState};
 use serde::{Deserialize, Serialize};
 
-use crate::{actions::config, platform, state::AppState};
+use crate::{
+    actions::{config, core},
+    platform,
+    state::AppState,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,14 +69,23 @@ pub async fn set_tun(state: &AppState, enabled: bool) -> Result<SwitchStatus> {
         snapshot.state,
         KernelState::Running | KernelState::Unhealthy | KernelState::Starting | KernelState::Restarting
     ) {
-        state.kernel.restart().await?;
-        status.core_restarted = true;
-        status.runtime_applied = Some(true);
-        status.requires_core_restart = false;
-        status.message = if enabled {
+        let operation = core::restart(state).await?;
+        status.core_restarted = operation.accepted
+            && matches!(
+                operation.state,
+                KernelState::Running | KernelState::Unhealthy | KernelState::Starting | KernelState::Restarting
+            );
+        status.runtime_applied = Some(status.core_restarted);
+        status.requires_core_restart = !status.core_restarted;
+        status.core_state = Some(operation.state);
+        status.message = if enabled && status.core_restarted {
             "TUN 配置已保存，runtime 已重新生成，正在运行的 Core 已重启并应用".into()
-        } else {
+        } else if enabled {
+            "TUN 配置已保存，runtime 已重新生成；Core 未接受重启，请用当前管理方重启后生效".into()
+        } else if status.core_restarted {
             "TUN 配置已保存，runtime 已重新生成，正在运行的 Core 已按关闭状态重启".into()
+        } else {
+            "TUN 配置已保存，runtime 已重新生成；Core 未接受重启，请用当前管理方重启后生效".into()
         };
     } else {
         status.runtime_applied = Some(false);

@@ -25,7 +25,7 @@ use crate::mihomo_controller::{
 use crate::subscriptions::{SubscriptionProfileStatus, SubscriptionSweep};
 use crate::{actions, options::ClashTuiOptions, state::AppState};
 use clash_core::{
-    IProfiles, KernelSnapshot, KernelState, LocalProfileImport, PrfItem,
+    IProfiles, KernelOwner, KernelSnapshot, KernelState, LocalProfileImport, PrfItem,
     config::{PrfExtra, PrfSelected},
 };
 
@@ -45,6 +45,16 @@ fn test_job(id: &str, status: JobStatus) -> JobRecord {
     }
 }
 
+fn assert_markers_in_order(text: &str, markers: &[&str]) {
+    let mut cursor = 0;
+    for marker in markers {
+        let offset = text[cursor..]
+            .find(marker)
+            .expect("overview marker should be rendered in order");
+        cursor += offset + marker.len();
+    }
+}
+
 fn test_diagnose_report(recommendations: Vec<String>) -> actions::diagnose::DiagnoseReport {
     actions::diagnose::DiagnoseReport {
         status: actions::diagnose::DiagnoseStatus::NeedsAttention,
@@ -55,6 +65,8 @@ fn test_diagnose_report(recommendations: Vec<String>) -> actions::diagnose::Diag
         }),
         kernel: KernelSnapshot {
             state: KernelState::Running,
+            owner: KernelOwner::Detached,
+            owner_detail: None,
             pid: Some(42),
             version: Some("test".into()),
             last_error: None,
@@ -376,6 +388,8 @@ async fn dashboard_renders_numbered_navigation_and_actionable_summary() {
         view: View::Dashboard,
         kernel_snapshot: Some(KernelSnapshot {
             state: KernelState::Running,
+            owner: KernelOwner::Systemd,
+            owner_detail: Some("clash-tui.service".into()),
             pid: Some(1001),
             version: Some("v1.19.27".into()),
             last_error: Some(
@@ -433,11 +447,27 @@ async fn dashboard_renders_numbered_navigation_and_actionable_summary() {
     assert!(rendered.contains("快捷节点"));
     assert!(rendered.contains("快速开关"));
     assert!(rendered.contains("模式切换"));
+    assert_markers_in_order(
+        &rendered,
+        &[
+            "核心",
+            "客户端",
+            "管理方",
+            "实时",
+            "订阅流量",
+            "用量进度",
+            "订阅更新",
+            "终端类型",
+        ],
+    );
     assert!(rendered.contains("核心"));
     assert!(rendered.contains("v1.19.27"));
     assert!(rendered.contains("PID 1001"));
+    assert!(rendered.contains("管理方"));
+    assert!(rendered.contains("systemd"));
+    assert!(rendered.contains("clash-tui.service"));
     assert!(rendered.contains("客户端"));
-    assert!(rendered.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
+    assert!(rendered.contains(concat!("v", env!("CLASH_TUI_APP_VERSION"))));
     assert!(rendered.contains("实时"));
     assert!(rendered.contains("内存 12.0 MB"));
     assert!(rendered.contains("订阅流量"));
@@ -553,6 +583,9 @@ fn dashboard_proxy_popups_render_scrollable_groups_and_nodes_without_type_status
         .into_iter()
         .find(|line| line.contains("节点") && line.contains("延迟"))
         .expect("node popup header");
+    let node_header_popup = &node_header[node_header
+        .find("节点延迟")
+        .expect("node popup header should contain compact columns")..];
     assert!(rendered.contains("选择节点"));
     assert!(rendered.contains("节点 27"));
     assert!(rendered.contains("剩余流量"));
@@ -569,8 +602,8 @@ fn dashboard_proxy_popups_render_scrollable_groups_and_nodes_without_type_status
     );
     assert!(!rendered.contains("0ms"));
     assert!(rendered.contains("█"));
-    assert!(!node_header.contains("类型"));
-    assert!(!node_header.contains("状态"));
+    assert!(!node_header_popup.contains("类型"));
+    assert!(!node_header_popup.contains("状态"));
 }
 
 #[tokio::test]
@@ -2320,6 +2353,8 @@ async fn proxies_view_shows_runtime_diagnose_details_when_empty() {
             }),
             kernel: KernelSnapshot {
                 state: KernelState::Running,
+                owner: KernelOwner::Detached,
+                owner_detail: None,
                 pid: Some(42),
                 version: Some("test".into()),
                 last_error: None,
@@ -3029,6 +3064,8 @@ fn pinned_import_status_survives_kernel_events() {
             payload: ClashTuiEventPayload::KernelStateChanged {
                 kernel: KernelSnapshot {
                     state: KernelState::Running,
+                    owner: KernelOwner::Detached,
+                    owner_detail: None,
                     pid: Some(42),
                     version: Some("test".into()),
                     last_error: None,

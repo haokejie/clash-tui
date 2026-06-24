@@ -30,7 +30,7 @@ pub fn collect(started_at: Instant) -> SystemInfoPayload {
     let is_admin = is_admin();
     let uptime_ms = app_uptime_ms(started_at);
     let network_interfaces = network_interface_names();
-    let app_version = env!("CARGO_PKG_VERSION");
+    let app_version = env!("CLASH_TUI_APP_VERSION");
     let running_mode = "TUI";
     let display = format_system_info(
         &system_name,

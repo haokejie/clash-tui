@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::{process::Command, time::timeout};
 
-use crate::{jobs::JobRecord, state::AppState};
+use crate::{actions::core, jobs::JobRecord, state::AppState};
 
 const RUNTIME_VALIDATE_JOB_KIND: &str = "runtime-config-validate";
 const DNS_VALIDATE_JOB_KIND: &str = "dns-config-validate";
@@ -77,9 +77,9 @@ pub async fn apply_dns_config(state: Arc<AppState>, apply: bool) -> Result<DnsAp
     }
 
     let runtime = state.runtime.generate_with_dns_override(Some(apply)).await?;
-    let snapshot = state.kernel.snapshot().await;
+    let snapshot = state.kernel.external_snapshot().await;
     let restart = if matches!(snapshot.state, KernelState::Running | KernelState::Unhealthy) {
-        Some(state.kernel.restart().await?)
+        Some(core::restart(state.as_ref()).await?)
     } else {
         None
     };

@@ -10,6 +10,6 @@ pub use config::{
     ConfigFile, ConfigLoadResult, ConfigStore, IAppSettings, IClashTemp, IProfiles, IRuntime, LocalProfileImport,
     PrfItem, PrfOption, RemoteProfileImport, RuntimeConfigGenerator, RuntimeConfigResult,
 };
-pub use kernel::{KernelSnapshot, KernelState, OperationStatus};
+pub use kernel::{KernelOwner, KernelSnapshot, KernelState, OperationStatus};
 pub use paths::{AppPathSummary, AppPaths};
 pub use validation::{ValidationErrorKind, ValidationOutcome, ValidationSkipReason};

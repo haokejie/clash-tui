@@ -132,7 +132,15 @@ manifest_package_name() {
   fi
 }
 
+systemd_available() {
+  command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
+}
+
 service_state() {
+  if [[ "${SYSTEMD_AVAILABLE:-0}" != "1" ]]; then
+    printf 'unavailable\n'
+    return
+  fi
   local state
   state="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
   if [[ -n "$state" ]]; then
@@ -148,6 +156,10 @@ HOME_DIR="$(make_abs "$HOME_DIR")"
 BIN_DIR="$(make_abs "$BIN_DIR")"
 SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
 require_safe_prefix "$PREFIX"
+SYSTEMD_AVAILABLE=0
+if systemd_available; then
+  SYSTEMD_AVAILABLE=1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR=""
@@ -183,7 +195,7 @@ NEW_PACKAGE="$(manifest_package_name "$SOURCE_DIR/manifest.json")"
 
 SERVICE_PREVIOUS_STATE="$(service_state)"
 SERVICE_WAS_ACTIVE=0
-if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+if [[ "$SYSTEMD_AVAILABLE" == "1" ]] && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
   SERVICE_WAS_ACTIVE=1
 fi
 
@@ -243,6 +255,7 @@ cat > "$PREFIX/install-layout.env" <<EOF
 CLASH_TUI_HOME=$HOME_DIR
 CLASH_TUI_RESOURCE_DIR=$PREFIX/resources
 CLASH_TUI_MIHOMO_BIN=$PREFIX/resources/mihomo
+CLASH_TUI_SERVICE_NAME=$SERVICE_NAME
 EOF
 chmod 644 "$PREFIX/install-layout.env"
 
@@ -264,29 +277,36 @@ if [[ "$BIN_LINK" == "1" ]]; then
   fi
 fi
 
-install -m 644 "$PREFIX/systemd/clash-tui.service" "$SERVICE_PATH"
+SERVICE_CURRENT_STATE="unavailable"
+if [[ "$SYSTEMD_AVAILABLE" == "1" && -f "$PREFIX/systemd/clash-tui.service" ]]; then
+  install -m 644 "$PREFIX/systemd/clash-tui.service" "$SERVICE_PATH"
 
-PREFIX_SED="$(sed_replacement "$PREFIX")"
-CONFIG_DIR_SED="$(sed_replacement "$CONFIG_DIR")"
-HOME_DIR_SED="$(sed_replacement "$HOME_DIR")"
-sed -i \
-  -e "s#WorkingDirectory=/opt/clash-tui#WorkingDirectory=$PREFIX_SED#g" \
-  -e "s#CLASH_TUI_HOME=/var/lib/clash-tui#CLASH_TUI_HOME=$HOME_DIR_SED#g" \
-  -e "s#CLASH_TUI_RESOURCE_DIR=/opt/clash-tui/resources#CLASH_TUI_RESOURCE_DIR=$PREFIX_SED/resources#g" \
-  -e "s#CLASH_TUI_MIHOMO_BIN=/opt/clash-tui/resources/mihomo#CLASH_TUI_MIHOMO_BIN=$PREFIX_SED/resources/mihomo#g" \
-  -e "s#EnvironmentFile=-/etc/clash-tui/env#EnvironmentFile=-$CONFIG_DIR_SED/env#g" \
-  -e "s#/opt/clash-tui/clash-tui#$PREFIX_SED/clash-tui#g" \
-  "$SERVICE_PATH"
-restore_selinux_context "$SERVICE_PATH"
+  PREFIX_SED="$(sed_replacement "$PREFIX")"
+  CONFIG_DIR_SED="$(sed_replacement "$CONFIG_DIR")"
+  HOME_DIR_SED="$(sed_replacement "$HOME_DIR")"
+  SERVICE_NAME_SED="$(sed_replacement "$SERVICE_NAME")"
+  sed -i \
+    -e "s#WorkingDirectory=/opt/clash-tui#WorkingDirectory=$PREFIX_SED#g" \
+    -e "s#CLASH_TUI_HOME=/var/lib/clash-tui#CLASH_TUI_HOME=$HOME_DIR_SED#g" \
+    -e "s#CLASH_TUI_RESOURCE_DIR=/opt/clash-tui/resources#CLASH_TUI_RESOURCE_DIR=$PREFIX_SED/resources#g" \
+    -e "s#CLASH_TUI_MIHOMO_BIN=/opt/clash-tui/resources/mihomo#CLASH_TUI_MIHOMO_BIN=$PREFIX_SED/resources/mihomo#g" \
+    -e "s#CLASH_TUI_SERVICE_NAME=clash-tui.service#CLASH_TUI_SERVICE_NAME=$SERVICE_NAME_SED#g" \
+    -e "s#EnvironmentFile=-/etc/clash-tui/env#EnvironmentFile=-$CONFIG_DIR_SED/env#g" \
+    -e "s#/opt/clash-tui/clash-tui#$PREFIX_SED/clash-tui#g" \
+    "$SERVICE_PATH"
+  restore_selinux_context "$SERVICE_PATH"
 
-systemctl daemon-reload
-if [[ "$ENABLE" == "1" ]]; then
-  systemctl enable "$SERVICE_NAME"
+  systemctl daemon-reload
+  if [[ "$ENABLE" == "1" ]]; then
+    systemctl enable "$SERVICE_NAME"
+  fi
+  if [[ "$SHOULD_START" == "1" ]]; then
+    systemctl restart "$SERVICE_NAME"
+  fi
+  SERVICE_CURRENT_STATE="$(service_state)"
+else
+  echo "systemd not available; skipping service installation"
 fi
-if [[ "$SHOULD_START" == "1" ]]; then
-  systemctl restart "$SERVICE_NAME"
-fi
-SERVICE_CURRENT_STATE="$(service_state)"
 
 CLI_COMMAND="$PREFIX/clash-tui"
 if [[ "$BIN_LINK" == "1" ]]; then
@@ -303,9 +323,13 @@ echo "  install dir: $PREFIX"
 echo "  config dir:  $CONFIG_DIR"
 echo "  data dir:    $HOME_DIR"
 echo "  resources:   $PREFIX/resources"
-echo "  service:     $SERVICE_NAME"
-echo "  service was: $SERVICE_PREVIOUS_STATE"
-echo "  service now: $SERVICE_CURRENT_STATE"
+if [[ "$SYSTEMD_AVAILABLE" == "1" ]]; then
+  echo "  service:     $SERVICE_NAME"
+  echo "  service was: $SERVICE_PREVIOUS_STATE"
+  echo "  service now: $SERVICE_CURRENT_STATE"
+else
+  echo "  service:     unavailable (systemd/systemctl not detected)"
+fi
 echo "  command:     $CLI_COMMAND"
 echo
 echo "Use it:"
@@ -313,4 +337,9 @@ echo "  open TUI:       $CLI_COMMAND"
 echo "  open TUI also:  $CLI_COMMAND tui"
 echo "  show help:      $CLI_COMMAND --help"
 echo "  core status:    $CLI_COMMAND core status"
-echo "  service status: systemctl status $SERVICE_NAME"
+if [[ "$SYSTEMD_AVAILABLE" == "1" ]]; then
+  echo "  service status: systemctl status $SERVICE_NAME"
+else
+  echo "  core start:     $CLI_COMMAND core start"
+  echo "  core stop:      $CLI_COMMAND core stop"
+fi

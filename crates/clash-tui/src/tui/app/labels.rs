@@ -1,4 +1,4 @@
-use clash_core::KernelState;
+use clash_core::{KernelOwner, KernelState};
 
 use crate::{actions, actions::config::SettingsSummary, jobs::JobStatus, mihomo_controller::Mode};
 
@@ -90,6 +90,16 @@ pub(crate) const fn bool_label(enabled: bool) -> &'static str {
 
 pub(crate) const fn alive_label(alive: bool) -> &'static str {
     if alive { "可用" } else { "不可用" }
+}
+
+pub(crate) const fn kernel_owner_label(owner: KernelOwner) -> &'static str {
+    match owner {
+        KernelOwner::Stopped => "未运行",
+        KernelOwner::Detached => "手动",
+        KernelOwner::Supervised => "Supervisor",
+        KernelOwner::Systemd => "systemd",
+        KernelOwner::External => "外部",
+    }
 }
 
 pub(crate) fn seconds_until_label(seconds: u64) -> String {

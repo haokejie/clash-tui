@@ -14,7 +14,9 @@ use clash_core::KernelState;
 
 use crate::{
     mihomo_controller::Mode,
-    tui::{DashboardProxyPopup, TuiApp, alive_label, kernel_state_label, visible_indices_with_offset},
+    tui::{
+        DashboardProxyPopup, TuiApp, alive_label, kernel_owner_label, kernel_state_label, visible_indices_with_offset,
+    },
 };
 
 use super::layout::{
@@ -26,7 +28,7 @@ use super::layout::{
 };
 
 const LABEL_WIDTH: usize = 10;
-const APP_VERSION_LABEL: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+const APP_VERSION_LABEL: &str = concat!("v", env!("CLASH_TUI_APP_VERSION"));
 
 #[derive(Debug, Clone, Copy)]
 struct DashboardSection {
@@ -170,8 +172,10 @@ fn render_overview(area: Rect, buffer: &mut Buffer, app: &TuiApp) {
     let width = usize::from(area.width).max(1);
     let mut lines = Vec::new();
     let (core_value, core_state) = core_summary(app);
+    let (owner_value, owner_detail) = core_owner_summary(app);
     lines.push(key_value_line("核心", &core_value, Some(core_state), width));
     lines.push(key_value_line("客户端", APP_VERSION_LABEL, None, width));
+    lines.push(key_value_line("管理方", &owner_value, owner_detail, width));
     lines.push(key_value_line(
         "实时",
         &format!(
@@ -185,6 +189,10 @@ fn render_overview(area: Rect, buffer: &mut Buffer, app: &TuiApp) {
         )),
         width,
     ));
+    let usage = subscription_usage(app);
+    lines.push(key_value_line("订阅流量", &usage.summary, usage.profile.clone(), width));
+    lines.push(progress_line("用量进度", usage.percent, width));
+    lines.push(key_value_line("订阅更新", &usage.updated, None, width));
     lines.push(key_value_line(
         "终端类型",
         &terminal_type_label(),
@@ -194,10 +202,6 @@ fn render_overview(area: Rect, buffer: &mut Buffer, app: &TuiApp) {
         )),
         width,
     ));
-    let usage = subscription_usage(app);
-    lines.push(key_value_line("订阅流量", &usage.summary, usage.profile.clone(), width));
-    lines.push(progress_line("用量进度", usage.percent, width));
-    lines.push(key_value_line("订阅更新", &usage.updated, None, width));
 
     render_clipped_lines(area, buffer, lines);
 }
@@ -703,6 +707,18 @@ fn core_summary(app: &TuiApp) -> (String, String) {
         format!("{version} / PID {pid}"),
         kernel_state_label(snapshot.state).to_owned(),
     )
+}
+
+fn core_owner_summary(app: &TuiApp) -> (String, Option<String>) {
+    let Some(snapshot) = app.kernel_snapshot.as_ref() else {
+        return ("未刷新".into(), None);
+    };
+    let detail = snapshot
+        .owner_detail
+        .as_deref()
+        .filter(|detail| !detail.trim().is_empty())
+        .map(str::to_owned);
+    (kernel_owner_label(snapshot.owner).to_owned(), detail)
 }
 
 const fn bracket_bool(enabled: bool) -> &'static str {

@@ -4,16 +4,17 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=simple
 WorkingDirectory=/opt/clash-tui
 Environment=CLASH_TUI_HOME=/var/lib/clash-tui
 Environment=CLASH_TUI_RESOURCE_DIR=/opt/clash-tui/resources
 Environment=CLASH_TUI_MIHOMO_BIN=/opt/clash-tui/resources/mihomo
+Environment=CLASH_TUI_CORE_OWNER=systemd
+Environment=CLASH_TUI_SERVICE_NAME=clash-tui.service
 EnvironmentFile=-/etc/clash-tui/env
-ExecStart=/opt/clash-tui/clash-tui core start
-ExecStop=/opt/clash-tui/clash-tui core stop
-ExecReload=/opt/clash-tui/clash-tui core restart
+ExecStart=/opt/clash-tui/clash-tui core run
+Restart=on-failure
+RestartSec=2s
 User=root
 Group=root
 TimeoutStopSec=15s

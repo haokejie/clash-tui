@@ -265,6 +265,13 @@ fn clash_tui_package_emits_online_bootstrap_and_omits_sidecar_install_script() {
     assert!(package_install.contains("SHOULD_START"));
     assert!(package_install.contains("open TUI:"));
     assert!(package_install.contains("service status: systemctl status"));
+    assert!(package_install.contains("systemd not available; skipping service installation"));
+    let package_service =
+        fs::read_to_string(out_dir.join(REAL_PACKAGE_NAME).join("systemd/clash-tui.service")).expect("read service");
+    assert!(package_service.contains("Type=simple"));
+    assert!(package_service.contains("CLASH_TUI_CORE_OWNER=systemd"));
+    assert!(package_service.contains("ExecStart=/opt/clash-tui/clash-tui core run"));
+    assert!(package_service.contains("Restart=on-failure"));
     let manifest: Value = serde_json::from_str(
         &fs::read_to_string(out_dir.join(REAL_PACKAGE_NAME).join("manifest.json")).expect("read manifest"),
     )

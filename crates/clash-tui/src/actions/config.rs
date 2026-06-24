@@ -250,7 +250,7 @@ pub async fn apply_core_log_enabled(state: &AppState, enabled: bool) -> Result<C
     };
 
     if running {
-        let operation = state.kernel.restart().await?;
+        let operation = super::core::restart(state).await?;
         status.core_state = Some(operation.state);
         status.core_restarted = operation.accepted
             && matches!(
@@ -447,7 +447,7 @@ async fn apply_external_controller_patch(
     };
 
     if restart_needed {
-        let operation = state.kernel.restart().await?;
+        let operation = super::core::restart(state).await?;
         let core_restarted = operation.accepted
             && matches!(
                 operation.state,

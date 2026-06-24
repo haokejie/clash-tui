@@ -207,7 +207,7 @@ pub async fn activate(state: Arc<AppState>, uid: String, start_core: bool) -> Re
         let started_core = if start_core
             && matches!(runtime_apply.core_state, KernelState::Stopped | KernelState::Crashed)
         {
-            state.kernel.start().await?;
+            super::core::start(state.as_ref()).await?;
             let _ =
                 super::controller::apply_saved_proxy_selections_with_retry(&state, APPLY_SAVED_SELECTION_TIMEOUT).await;
             true

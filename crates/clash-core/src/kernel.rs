@@ -14,10 +14,25 @@ pub enum KernelState {
     Updating,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KernelOwner {
+    #[default]
+    Stopped,
+    Detached,
+    Supervised,
+    Systemd,
+    External,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KernelSnapshot {
     pub state: KernelState,
+    #[serde(default)]
+    pub owner: KernelOwner,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,6 +48,8 @@ impl KernelSnapshot {
     pub const fn stopped() -> Self {
         Self {
             state: KernelState::Stopped,
+            owner: KernelOwner::Stopped,
+            owner_detail: None,
             pid: None,
             version: None,
             last_error: None,
@@ -54,13 +71,17 @@ pub struct OperationStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_job: Option<String>,
     pub state: KernelState,
+    #[serde(default)]
+    pub owner: KernelOwner,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use super::{KernelSnapshot, KernelState};
+    use super::{KernelOwner, KernelSnapshot, KernelState};
 
     #[test]
     fn kernel_state_uses_api_wire_names() {
@@ -69,6 +90,10 @@ mod tests {
 
         let snapshot = serde_json::to_value(KernelSnapshot::stopped()).expect("serialize snapshot");
         assert_eq!(snapshot["state"], "stopped");
+        assert_eq!(snapshot["owner"], "stopped");
         assert!(snapshot.get("pid").is_none());
+
+        let owner = serde_json::to_value(KernelOwner::Systemd).expect("serialize kernel owner");
+        assert_eq!(owner, "systemd");
     }
 }

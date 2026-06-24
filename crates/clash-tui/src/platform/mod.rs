@@ -345,7 +345,7 @@ fn linux_tun_diagnostics(enabled: bool, mihomo_bin: &Path) -> TunDiagnostics {
     let checks = vec![
         tun_device.clone(),
         privilege.clone(),
-        capability_tools.clone(),
+        capability_tools,
         TunCheck {
             name: "iproute2".into(),
             ok: ip_command_exists,
@@ -510,7 +510,7 @@ fn linux_getcap_has_cap_net_admin(stdout: &str) -> bool {
     stdout
         .lines()
         .flat_map(|line| line.split_whitespace().skip(1))
-        .any(|capability_set| linux_capability_set_has_net_admin(capability_set))
+        .any(linux_capability_set_has_net_admin)
 }
 
 #[cfg(target_os = "linux")]

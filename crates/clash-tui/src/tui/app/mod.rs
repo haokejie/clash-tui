@@ -13,8 +13,8 @@ mod text;
 pub use runner::run;
 
 pub(crate) use labels::{
-    alive_label, bool_label, job_status_label, kernel_state_label, mode_label, seconds_until_label, setting_label,
-    setting_value, settings_rows,
+    alive_label, bool_label, job_status_label, kernel_owner_label, kernel_state_label, mode_label, seconds_until_label,
+    setting_label, setting_value, settings_rows,
 };
 pub(crate) use models::{DashboardProxyPopup, ProviderDialogKind, ProviderSubscriptionInfoRow, ProxyPane, SettingRow};
 pub(crate) use selection::{content_rows, visible_indices, visible_indices_with_offset};
