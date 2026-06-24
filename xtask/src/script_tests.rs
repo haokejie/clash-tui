@@ -118,6 +118,7 @@ fn remote_tui_smoke_script_keeps_required_acceptance_safeguards() {
         "模式切换",
         "key code=char",
         "key code=esc",
+        "target/clash-tui-acceptance/remote-smoke/$RUN_ID/report.json",
     ] {
         assert!(
             source.contains(&marker_regex_literal(marker)),

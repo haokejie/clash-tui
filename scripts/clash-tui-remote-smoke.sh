@@ -30,7 +30,7 @@ Options:
   --rows ROWS              TTY rows, default 40
   --cols COLS              TTY cols, default 140
   --remote-dir DIR         remote evidence directory under the SSH user
-  --output PATH            JSON report path, default target/clash-tui-remote-smoke-*.json
+  --output PATH            JSON report path, default target/clash-tui-acceptance/remote-smoke/*/report.json
   --password-env NAME      env var containing SSH password, default CLASH_TUI_SSH_PASSWORD
   --cleanup-remote         remove the remote wrapper/evidence directory after the run
   -h, --help               show this help
@@ -139,7 +139,7 @@ if [[ -z "$REMOTE_DIR" ]]; then
   REMOTE_DIR="/tmp/clash-tui-remote-smoke-$RUN_ID"
 fi
 if [[ -z "$OUTPUT_PATH" ]]; then
-  OUTPUT_PATH="target/clash-tui-remote-smoke-$RUN_ID.json"
+  OUTPUT_PATH="target/clash-tui-acceptance/remote-smoke/$RUN_ID/report.json"
 fi
 
 PASSWORD="${!PASSWORD_ENV:-}"
