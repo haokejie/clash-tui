@@ -3,6 +3,10 @@ name = "xtask"
 edition = "2024"
 publish = false
 license = "GPL-3.0-only"
+description = "Project automation tasks for clash-tui"
+repository = "https://github.com/haokejie/clash-tui"
+homepage = "https://github.com/haokejie/clash-tui"
+readme = "../README.md"
 
 [dependencies]
 serde_json = { workspace = true }

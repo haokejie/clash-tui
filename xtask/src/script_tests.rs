@@ -257,6 +257,7 @@ fn clash_tui_package_emits_online_bootstrap_and_omits_sidecar_install_script() {
     assert!(!out_dir.join(format!("{REAL_PACKAGE_NAME}.install.sh")).exists());
     let online_install = fs::read_to_string(out_dir.join("install.sh")).expect("read online install");
     assert!(online_install.contains("CLASH_TUI_INSTALL_BASE_URL"));
+    assert!(online_install.contains("https://github.com/haokejie/clash-tui/releases/latest/download"));
     assert!(online_install.contains("delegating to package installer"));
     let package_install =
         fs::read_to_string(out_dir.join(REAL_PACKAGE_NAME).join("install.sh")).expect("read package install");
@@ -276,7 +277,7 @@ fn clash_tui_package_emits_online_bootstrap_and_omits_sidecar_install_script() {
         &fs::read_to_string(out_dir.join(REAL_PACKAGE_NAME).join("manifest.json")).expect("read manifest"),
     )
     .expect("parse manifest");
-    assert_eq!(manifest["versions"], json!({ "app": "0.2.0" }));
+    assert_eq!(manifest["versions"], json!({ "app": "0.2.1" }));
     assert!(manifest["mihomo"]["version"].is_string());
     let _ = fs::remove_dir_all(tmp_dir);
 }
@@ -389,7 +390,7 @@ fn create_package_fixture(stale_bootstrap: bool, dirty: bool) -> PackageFixture 
         "gitDirty": dirty,
         "target": "x86_64-unknown-linux-gnu",
         "dockerPlatform": "linux/amd64",
-        "versions": { "app": "0.2.0" },
+        "versions": { "app": "0.2.1" },
         "clashTui": { "binary": "clash-tui", "sha256": sha256(&package_dir.join("clash-tui")).expect("clash-tui sha256") },
         "mihomo": {
             "binary": "resources/mihomo",

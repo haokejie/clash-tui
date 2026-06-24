@@ -3,6 +3,13 @@ name = "clash-tui"
 edition = "2024"
 rust-version = "1.91"
 license = "GPL-3.0-only"
+publish = false
+description = "Local TUI/CLI controller for mihomo"
+repository = "https://github.com/haokejie/clash-tui"
+homepage = "https://github.com/haokejie/clash-tui"
+readme = "../../README.md"
+keywords = ["clash", "mihomo", "tui", "cli", "proxy"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = { workspace = true }

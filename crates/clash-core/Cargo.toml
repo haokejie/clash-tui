@@ -3,6 +3,11 @@ name = "clash-core"
 edition = "2024"
 rust-version = "1.91"
 license = "GPL-3.0-only"
+publish = false
+description = "Core configuration and runtime logic for clash-tui"
+repository = "https://github.com/haokejie/clash-tui"
+homepage = "https://github.com/haokejie/clash-tui"
+readme = "../../README.md"
 
 [dependencies]
 anyhow = { workspace = true }

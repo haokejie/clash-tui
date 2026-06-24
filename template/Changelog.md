@@ -1,13 +1,17 @@
-## v(Version Goes Here)
+## vX.Y.Z - YYYY-MM-DD
 
-### 🐞 修复问题
+### Added
 
-<details>
-<summary><strong> ✨ 新增功能 </strong></summary>
+- Add entries here.
 
-</details>
+### Changed
 
-<details>
-<summary><strong> 🚀 优化改进 </strong></summary>
+- Add entries here.
 
-</details>
+### Fixed
+
+- Add entries here.
+
+### Security
+
+- Add entries here.

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_URL="${CLASH_TUI_INSTALL_BASE_URL:-}"
+DEFAULT_BASE_URL="https://github.com/haokejie/clash-tui/releases/latest/download"
+BASE_URL="${CLASH_TUI_INSTALL_BASE_URL:-$DEFAULT_BASE_URL}"
 TARGET=""
 NO_SUDO="${CLASH_TUI_INSTALL_NO_SUDO:-0}"
 KEEP_TEMP=0
@@ -16,7 +17,9 @@ verifies it, extracts it, then delegates all real installation work to the
 archive's own install.sh.
 
 Options:
-  --base-url URL    Base URL containing install.sh, tar.gz, manifest, and sha256.
+  --base-url URL    Override the release asset base URL containing install.sh,
+                   tar.gz, manifest, and sha256 files. Defaults to:
+                   https://github.com/haokejie/clash-tui/releases/latest/download
                    Can also be set with CLASH_TUI_INSTALL_BASE_URL.
   --target TARGET   Package target or arch. Supported: x86_64, aarch64,
                    x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu.
@@ -27,10 +30,10 @@ Options:
   -h, --help        Show this help.
 
 Examples:
-  curl -fsSL "$BASE_URL/install.sh" | bash -s -- --base-url "$BASE_URL"
+  curl -fsSL https://github.com/haokejie/clash-tui/releases/latest/download/install.sh | bash
 
-  curl -fsSL "$BASE_URL/install.sh" | bash -s -- \
-    --base-url "$BASE_URL" -- --prefix /opt/clash-tui --no-start
+  curl -fsSL https://github.com/haokejie/clash-tui/releases/latest/download/install.sh | bash -s -- \
+    -- --prefix /opt/clash-tui --no-start
 EOF
 }
 
@@ -173,7 +176,7 @@ verify_archive() {
 }
 
 BASE_URL="$(strip_trailing_slash "$BASE_URL")"
-[[ -n "$BASE_URL" ]] || die "--base-url or CLASH_TUI_INSTALL_BASE_URL is required"
+[[ -n "$BASE_URL" ]] || die "release base URL is empty"
 
 need_cmd tar
 PACKAGE_ARCH="$(detect_package_arch)"
