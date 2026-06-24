@@ -515,7 +515,7 @@ impl KernelManager {
         IAppSettings::load_or_default(settings_path)
             .await
             .enable_core_log
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
 
     async fn sync_geo_resources(&self) -> Result<()> {

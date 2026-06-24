@@ -400,7 +400,7 @@ fn settings_from_config(
 }
 
 pub fn core_log_enabled(app_settings: &IAppSettings) -> bool {
-    app_settings.enable_core_log.unwrap_or(true)
+    app_settings.enable_core_log.unwrap_or(false)
 }
 
 const fn core_log_state_label(enabled: bool) -> &'static str {
@@ -745,8 +745,12 @@ mod tests {
     }
 
     #[test]
-    fn core_log_defaults_to_enabled_for_legacy_config() {
-        assert!(core_log_enabled(&IAppSettings::default()));
+    fn core_log_defaults_to_disabled_for_legacy_config() {
+        assert!(!core_log_enabled(&IAppSettings::default()));
+        assert!(core_log_enabled(&IAppSettings {
+            enable_core_log: Some(true),
+            ..IAppSettings::default()
+        }));
         assert!(!core_log_enabled(&IAppSettings {
             enable_core_log: Some(false),
             ..IAppSettings::default()
