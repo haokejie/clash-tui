@@ -1,19 +1,40 @@
 use std::{
-    path::{Component, Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
-use clash_core::{IProfiles, PrfItem, PrfOption};
+use clash_core::{
+    IProfiles, PrfItem, PrfOption,
+    config::{
+        profiles::{RemoteProfileDownload, download_remote_profile},
+        store::RemoteProfileUpdatePlan,
+    },
+};
 use serde::Serialize;
 
 use crate::{
+    actions::profile_transaction::{
+        ProfileSnapshotSpec, ProfileTransactionLock, ProfileTransactionSpec, RuntimeCommitOptions, RuntimePolicy,
+        run_profile_transaction,
+    },
     jobs::{JobRecord, JobStatus},
     state::AppState,
 };
 
 const PROFILE_UPDATE_JOB_KIND: &str = "profile-update";
+
+#[derive(Debug, Clone)]
+struct PreparedProfileUpdate {
+    plan: RemoteProfileUpdatePlan,
+    remote: RemoteProfileDownload,
+}
+
+#[derive(Debug, Clone)]
+struct ProfileUpdateCommitResult {
+    profiles: IProfiles,
+    runtime_refresh: ProfileUpdateRuntimeRefresh,
+}
 #[derive(Debug, Clone, Serialize)]
 pub struct StartedProfileUpdateJob {
     pub job: JobRecord,
@@ -203,38 +224,23 @@ async fn run_profile_update_job(state: Arc<AppState>, job_id: String, uid: Strin
         .start(&job_id, "downloading remote profile via direct connection")
         .await;
 
-    let rollback = match capture_update_backup_if_current(&state, &uid).await {
-        Ok(rollback) => rollback,
-        Err(err) => {
-            state.jobs.fail(&job_id, err.to_string()).await;
-            return;
-        }
-    };
-
     match update_remote_profile_with_retry(&state, &job_id, &uid, option.as_ref()).await {
-        Ok(profiles) => {
+        Ok(prepared) => {
             state.jobs.progress(&job_id, "saving profile metadata").await;
-            state.config.write().await.profiles = profiles.clone();
-            match refresh_current_runtime_after_profile_update(&state, &uid, &profiles).await {
-                Ok(runtime_refresh) => {
-                    let result = Some(profile_update_job_result(&uid, &profiles, &runtime_refresh));
-                    let message = profile_update_success_message(&runtime_refresh);
+            match commit_profile_update_transaction(&state, &uid, prepared).await {
+                Ok(commit) => {
+                    let result = Some(profile_update_job_result(
+                        &uid,
+                        &commit.profiles,
+                        &commit.runtime_refresh,
+                    ));
+                    let message = profile_update_success_message(&commit.runtime_refresh);
                     state.jobs.finish(&job_id, message, result).await;
                 }
                 Err(err) => {
-                    let rollback_message = match rollback.as_ref() {
-                        Some(rollback) => match rollback.restore(&state).await {
-                            Ok(()) => "；已回滚订阅文件".to_owned(),
-                            Err(rollback_err) => format!("；回滚订阅文件失败：{rollback_err}"),
-                        },
-                        None => String::new(),
-                    };
                     state
                         .jobs
-                        .fail(
-                            &job_id,
-                            format!("订阅已下载，但运行配置应用失败：{err}{rollback_message}"),
-                        )
+                        .fail(&job_id, format!("订阅已下载，但配置提交或运行配置应用失败：{err}"))
                         .await;
                 }
             }
@@ -245,30 +251,47 @@ async fn run_profile_update_job(state: Arc<AppState>, job_id: String, uid: Strin
     }
 }
 
-async fn refresh_current_runtime_after_profile_update(
+async fn commit_profile_update_transaction(
     state: &AppState,
     uid: &str,
-    profiles: &IProfiles,
-) -> Result<ProfileUpdateRuntimeRefresh> {
-    if profiles.current.as_deref() != Some(uid) {
-        return Ok(ProfileUpdateRuntimeRefresh::default());
-    }
+    prepared: PreparedProfileUpdate,
+) -> Result<ProfileUpdateCommitResult> {
+    let uid = uid.to_owned();
+    let outcome =
+        run_profile_transaction(
+            state,
+            ProfileTransactionSpec {
+                failure_context: "subscription profile update failed",
+                rollback_success_message: "subscription profile was rolled back",
+                rollback_failed_message: "subscription profile rollback failed",
+                lock: ProfileTransactionLock::Wait,
+                snapshot: ProfileSnapshotSpec::ProfileFile { uid: uid.clone() },
+                runtime: RuntimePolicy::IfCurrentIs {
+                    uid: uid.clone(),
+                    options: RuntimeCommitOptions::apply_only(
+                        crate::actions::runtime_apply::RuntimeApplyOptions::default(),
+                    ),
+                },
+            },
+            move |_before| async move {
+                state
+                    .store
+                    .commit_remote_profile_update(&prepared.plan, prepared.remote)
+                    .await
+            },
+        )
+        .await?;
 
-    let _guard = state.profile_switch_lock.lock().await;
-    let latest_profiles = state.store.load_profiles().await?;
-    if latest_profiles.current.as_deref() != Some(uid) {
-        state.config.write().await.profiles = latest_profiles;
-        return Ok(ProfileUpdateRuntimeRefresh::default());
-    }
-    state.config.write().await.profiles = latest_profiles;
-
-    let apply = crate::actions::runtime_apply::generate_validate_and_apply(state).await?;
-    Ok(ProfileUpdateRuntimeRefresh {
-        current_profile: true,
-        runtime_path: Some(apply.runtime_path),
-        runtime_validated: apply.runtime_validated,
-        runtime_reloaded: apply.runtime_reloaded,
-        warning: None,
+    let runtime = outcome.runtime;
+    Ok(ProfileUpdateCommitResult {
+        profiles: outcome.profiles,
+        runtime_refresh: ProfileUpdateRuntimeRefresh {
+            current_profile: runtime.is_some(),
+            runtime_path: runtime.as_ref().map(|runtime| runtime.apply.runtime_path.clone()),
+            runtime_validated: runtime.as_ref().is_some_and(|runtime| runtime.apply.runtime_validated),
+            runtime_reloaded: runtime.as_ref().is_some_and(|runtime| runtime.apply.runtime_reloaded),
+            warning: None,
+        },
     })
 }
 
@@ -289,7 +312,7 @@ async fn update_remote_profile_with_retry(
     job_id: &str,
     uid: &str,
     option: Option<&PrfOption>,
-) -> Result<IProfiles> {
+) -> Result<PreparedProfileUpdate> {
     let attempts = [
         ("direct", Some(proxy_option(option, Some(false), Some(false)))),
         ("Clash proxy", Some(proxy_option(option, Some(false), Some(true)))),
@@ -302,8 +325,12 @@ async fn update_remote_profile_with_retry(
             .jobs
             .progress(job_id, format!("downloading remote profile via {label}"))
             .await;
-        match state.store.update_remote_profile(uid, attempt_option.as_ref()).await {
-            Ok(profiles) => return Ok(profiles),
+        let plan = state
+            .store
+            .prepare_remote_profile_update(uid, attempt_option.as_ref())
+            .await?;
+        match download_remote_profile(&plan.request).await {
+            Ok(remote) => return Ok(PreparedProfileUpdate { plan, remote }),
             Err(err) => errors.push(format!("{label}: {}", redact_urls(&err.to_string()))),
         }
     }
@@ -330,97 +357,6 @@ fn redact_urls(message: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-async fn capture_update_backup_if_current(state: &AppState, uid: &str) -> Result<Option<ProfileUpdateBackup>> {
-    let profiles = state.store.load_profiles().await?;
-    if profiles.current.as_deref() != Some(uid) {
-        return Ok(None);
-    }
-    ProfileUpdateBackup::capture(state, &profiles, uid).await.map(Some)
-}
-
-#[derive(Debug, Clone)]
-struct ProfileUpdateBackup {
-    profiles_config_path: PathBuf,
-    profiles_config: Option<Vec<u8>>,
-    profile_file_path: Option<PathBuf>,
-    profile_file: Option<Vec<u8>>,
-}
-
-impl ProfileUpdateBackup {
-    async fn capture(state: &AppState, profiles: &IProfiles, uid: &str) -> Result<Self> {
-        let item = profiles.get_item(uid)?;
-        let profile_file_path = item
-            .file
-            .as_deref()
-            .map(|file| profile_file_path(state, file))
-            .transpose()?;
-        let profile_file = match profile_file_path.as_ref() {
-            Some(path) => read_optional_file(path).await?,
-            None => None,
-        };
-        let profiles_config_path = state.store.paths().profiles_config.clone();
-        Ok(Self {
-            profiles_config: read_optional_file(&profiles_config_path).await?,
-            profiles_config_path,
-            profile_file_path,
-            profile_file,
-        })
-    }
-
-    async fn restore(&self, state: &AppState) -> Result<()> {
-        restore_optional_file(&self.profiles_config_path, self.profiles_config.as_deref()).await?;
-        if let Some(path) = self.profile_file_path.as_ref() {
-            restore_optional_file(path, self.profile_file.as_deref()).await?;
-        }
-        let profiles = state.store.load_profiles().await?;
-        state.config.write().await.profiles = profiles;
-        state.runtime.generate().await?;
-        Ok(())
-    }
-}
-
-fn profile_file_path(state: &AppState, file: &str) -> Result<PathBuf> {
-    let relative = Path::new(file);
-    if file.trim().is_empty() || relative.is_absolute() {
-        anyhow::bail!("invalid profile file path");
-    }
-
-    let mut components = relative.components();
-    let Some(Component::Normal(name)) = components.next() else {
-        anyhow::bail!("invalid profile file path");
-    };
-    if components.next().is_some() {
-        anyhow::bail!("profile file path must not contain directories");
-    }
-
-    Ok(state.store.paths().profiles_dir.join(name))
-}
-
-async fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
-    match tokio::fs::read(path).await {
-        Ok(content) => Ok(Some(content)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err.into()),
-    }
-}
-
-async fn restore_optional_file(path: &Path, content: Option<&[u8]>) -> Result<()> {
-    match content {
-        Some(content) => {
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            tokio::fs::write(path, content).await?;
-        }
-        None => match tokio::fs::remove_file(path).await {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        },
-    }
-    Ok(())
 }
 
 fn due_profile_uids(profiles: &IProfiles, now: u64) -> Vec<String> {
@@ -572,12 +508,15 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use clash_core::{IProfiles, LocalProfileImport, PrfItem, PrfOption};
+    use clash_core::{
+        IProfiles, PrfItem, PrfOption, RemoteProfileImport,
+        config::{profiles::RemoteProfileDownload, store::RemoteProfileUpdatePlan},
+    };
 
     use super::{
-        ProfileUpdateBackup, ProfileUpdateRuntimeRefresh, due_profile_uids, profile_update_job_result,
-        profile_update_success_message, redact_urls, refresh_current_runtime_after_profile_update,
-        subscription_profile_status, subscription_scheduler_status,
+        PreparedProfileUpdate, ProfileUpdateRuntimeRefresh, commit_profile_update_transaction, due_profile_uids,
+        profile_update_job_result, profile_update_success_message, redact_urls, subscription_profile_status,
+        subscription_scheduler_status,
     };
     use crate::{options::ClashTuiOptions, state::AppState};
 
@@ -716,7 +655,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_profile_update_regenerates_runtime_without_core() {
+    async fn current_profile_update_transaction_regenerates_runtime_without_core() {
         let root = temp_root("subscription-current-runtime");
         let _ = fs::remove_dir_all(&root);
         install_fake_mihomo(&root);
@@ -724,12 +663,34 @@ mod tests {
             ClashTuiOptions::new(Some(root.clone()), Some(root.join("resources")), None, 300).expect("options");
         let state = AppState::initialize(options).await.expect("state");
 
-        state
-            .store
-            .import_local_profile(&LocalProfileImport {
-                uid: Some("Lcurrent".into()),
+        let profiles = IProfiles {
+            current: Some("Rcurrent".into()),
+            items: Some(vec![PrfItem {
+                uid: Some("Rcurrent".into()),
+                itype: Some("remote".into()),
                 name: Some("Current".into()),
-                file_data: r"
+                file: Some("Rcurrent.yaml".into()),
+                url: Some("https://example.test/current".into()),
+                ..PrfItem::default()
+            }]),
+        };
+        profiles
+            .save_file(&state.store.paths().profiles_config)
+            .await
+            .expect("profiles");
+        tokio::fs::create_dir_all(&state.store.paths().profiles_dir)
+            .await
+            .expect("profiles dir");
+        tokio::fs::write(
+            state.store.paths().profiles_dir.join("Rcurrent.yaml"),
+            "mode: global\nproxies: []\nproxy-groups: []\nrules: []\n",
+        )
+        .await
+        .expect("old profile");
+        let prepared = prepared_update(
+            "Rcurrent",
+            "https://example.test/current",
+            r"
 proxies:
   - name: UniqueNode
     type: direct
@@ -740,16 +701,13 @@ proxy-groups:
       - UniqueNode
       - DIRECT
 rules: []
-"
-                .into(),
-            })
-            .await
-            .expect("current profile");
-        let profiles = state.store.load_profiles().await.expect("profiles");
+",
+        );
 
-        let refresh = refresh_current_runtime_after_profile_update(&state, "Lcurrent", &profiles)
+        let commit = commit_profile_update_transaction(&state, "Rcurrent", prepared)
             .await
-            .expect("runtime refresh");
+            .expect("update commit");
+        let refresh = commit.runtime_refresh;
 
         assert!(refresh.current_profile);
         assert!(
@@ -771,45 +729,71 @@ rules: []
     }
 
     #[tokio::test]
-    async fn non_current_profile_update_does_not_regenerate_runtime() {
+    async fn non_current_profile_update_transaction_does_not_regenerate_runtime() {
         let root = temp_root("subscription-non-current-runtime");
         let _ = fs::remove_dir_all(&root);
         let options =
             ClashTuiOptions::new(Some(root.clone()), Some(root.join("resources")), None, 300).expect("options");
         let state = AppState::initialize(options).await.expect("state");
 
-        state
-            .store
-            .import_local_profile(&LocalProfileImport {
-                uid: Some("Lcurrent".into()),
-                name: Some("Current".into()),
-                file_data: "mode: global\nproxies: []\nproxy-groups: []\nrules: []\n".into(),
-            })
+        let profiles = IProfiles {
+            current: Some("Rcurrent".into()),
+            items: Some(vec![
+                PrfItem {
+                    uid: Some("Rcurrent".into()),
+                    itype: Some("remote".into()),
+                    name: Some("Current".into()),
+                    file: Some("Rcurrent.yaml".into()),
+                    url: Some("https://example.test/current".into()),
+                    ..PrfItem::default()
+                },
+                PrfItem {
+                    uid: Some("Rother".into()),
+                    itype: Some("remote".into()),
+                    name: Some("Other".into()),
+                    file: Some("Rother.yaml".into()),
+                    url: Some("https://example.test/other".into()),
+                    ..PrfItem::default()
+                },
+            ]),
+        };
+        profiles
+            .save_file(&state.store.paths().profiles_config)
             .await
-            .expect("current profile");
-        state
-            .store
-            .import_local_profile(&LocalProfileImport {
-                uid: Some("Lother".into()),
-                name: Some("Other".into()),
-                file_data: "mode: rule\nproxies: []\nproxy-groups: []\nrules: []\n".into(),
-            })
+            .expect("profiles");
+        tokio::fs::create_dir_all(&state.store.paths().profiles_dir)
             .await
-            .expect("other profile");
-        let profiles = state.store.load_profiles().await.expect("profiles");
+            .expect("profiles dir");
+        tokio::fs::write(
+            state.store.paths().profiles_dir.join("Rcurrent.yaml"),
+            "mode: global\nproxies: []\nproxy-groups: []\nrules: []\n",
+        )
+        .await
+        .expect("current profile");
+        tokio::fs::write(
+            state.store.paths().profiles_dir.join("Rother.yaml"),
+            "mode: rule\nproxies: []\nproxy-groups: []\nrules: []\n",
+        )
+        .await
+        .expect("other profile");
+        let prepared = prepared_update(
+            "Rother",
+            "https://example.test/other",
+            "mode: direct\nproxies: []\nproxy-groups: []\nrules: []\n",
+        );
 
-        let refresh = refresh_current_runtime_after_profile_update(&state, "Lother", &profiles)
+        let commit = commit_profile_update_transaction(&state, "Rother", prepared)
             .await
-            .expect("runtime refresh");
+            .expect("update commit");
 
-        assert_eq!(refresh, ProfileUpdateRuntimeRefresh::default());
+        assert_eq!(commit.runtime_refresh, ProfileUpdateRuntimeRefresh::default());
         assert!(!state.store.paths().runtime_config.exists());
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
-    async fn profile_update_rollback_reports_runtime_regeneration_failure() {
+    async fn current_profile_update_transaction_restores_file_when_runtime_generation_fails() {
         let root = temp_root("subscription-rollback-runtime-failure");
         let _ = fs::remove_dir_all(&root);
         install_fake_mihomo(&root);
@@ -817,12 +801,13 @@ rules: []
             ClashTuiOptions::new(Some(root.clone()), Some(root.join("resources")), None, 300).expect("options");
         let state = AppState::initialize(options).await.expect("state");
         let profiles = IProfiles {
-            current: Some("Lbroken".into()),
+            current: Some("Rbroken".into()),
             items: Some(vec![PrfItem {
-                uid: Some("Lbroken".into()),
-                itype: Some("local".into()),
+                uid: Some("Rbroken".into()),
+                itype: Some("remote".into()),
                 name: Some("Broken".into()),
                 file: Some("broken.yaml".into()),
+                url: Some("https://example.test/broken".into()),
                 ..PrfItem::default()
             }]),
         };
@@ -830,28 +815,53 @@ rules: []
             .save_file(&state.store.paths().profiles_config)
             .await
             .expect("profiles");
-        let backup = ProfileUpdateBackup {
-            profiles_config_path: state.store.paths().profiles_config.clone(),
-            profiles_config: Some(
-                tokio::fs::read(&state.store.paths().profiles_config)
-                    .await
-                    .expect("read"),
-            ),
-            profile_file_path: Some(state.store.paths().profiles_dir.join("broken.yaml")),
-            profile_file: Some(b"proxy-groups: [".to_vec()),
-        };
-
-        let err = backup
-            .restore(&state)
+        tokio::fs::create_dir_all(&state.store.paths().profiles_dir)
             .await
-            .expect_err("runtime regeneration should fail");
+            .expect("profiles dir");
+        let old_profile = "mode: global\nproxies: []\nproxy-groups: []\nrules: []\n";
+        tokio::fs::write(state.store.paths().profiles_dir.join("broken.yaml"), old_profile)
+            .await
+            .expect("old profile");
+        let prepared = prepared_update("Rbroken", "https://example.test/broken", "proxy-groups: [");
+
+        let err = commit_profile_update_transaction(&state, "Rbroken", prepared)
+            .await
+            .expect_err("runtime generation should fail");
 
         assert!(
-            err.to_string().contains("broken.yaml"),
-            "error should include broken profile file: {err:#}"
+            err.to_string().contains("subscription profile was rolled back"),
+            "error should report rollback: {err:#}"
         );
+        let restored = tokio::fs::read_to_string(state.store.paths().profiles_dir.join("broken.yaml"))
+            .await
+            .expect("restored profile");
+        assert_eq!(restored, old_profile);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    fn prepared_update(uid: &str, url: &str, file_data: &str) -> PreparedProfileUpdate {
+        PreparedProfileUpdate {
+            plan: RemoteProfileUpdatePlan {
+                uid: uid.into(),
+                request: RemoteProfileImport {
+                    url: url.into(),
+                    uid: Some(uid.into()),
+                    name: None,
+                    desc: None,
+                    option: None,
+                },
+                option: None,
+            },
+            remote: RemoteProfileDownload {
+                url: url.into(),
+                file_data: file_data.into(),
+                name: "Updated".into(),
+                extra: None,
+                update_interval: None,
+                home: None,
+            },
+        }
     }
 
     fn temp_root(name: &str) -> std::path::PathBuf {

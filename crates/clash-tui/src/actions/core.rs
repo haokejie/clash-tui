@@ -1,4 +1,4 @@
-use std::{fs, time::Duration};
+use std::fs;
 
 use anyhow::{Context as _, Result, bail};
 use clash_core::{KernelOwner, KernelSnapshot, KernelState, OperationStatus};
@@ -8,10 +8,8 @@ use crate::{
     actions::controller,
     kernel::{DEFAULT_SYSTEMD_SERVICE_NAME, ENV_CORE_OWNER, ENV_SERVICE_NAME},
     state::AppState,
+    timeouts,
 };
-
-const APPLY_SAVED_SELECTION_TIMEOUT: Duration = Duration::from_secs(8);
-const SYSTEMD_SETTLE_DELAY: Duration = Duration::from_millis(250);
 
 pub async fn status(state: &AppState) -> KernelSnapshot {
     state.kernel.external_snapshot().await
@@ -114,7 +112,7 @@ async fn delegate_systemd(state: &AppState, action: &str, snapshot: &KernelSnaps
 
 async fn delegate_systemd_service(state: &AppState, action: &str, service: &str) -> Result<OperationStatus> {
     run_systemctl(action, service).await?;
-    sleep(SYSTEMD_SETTLE_DELAY).await;
+    sleep(timeouts::SYSTEMD_SETTLE_DELAY).await;
     let snapshot = state.kernel.external_snapshot().await;
     Ok(OperationStatus {
         accepted: true,
@@ -234,6 +232,8 @@ async fn apply_saved_proxy_selections_if_core_active(state: &AppState, status: &
             | clash_core::KernelState::Restarting
             | clash_core::KernelState::Unhealthy
     ) {
-        let _ = controller::apply_saved_proxy_selections_with_retry(state, APPLY_SAVED_SELECTION_TIMEOUT).await;
+        let _ =
+            controller::apply_saved_proxy_selections_with_retry(state, timeouts::SAVED_PROXY_SELECTION_APPLY_TIMEOUT)
+                .await;
     }
 }

@@ -136,6 +136,13 @@ impl SimpleMihomoClient {
         Self { config }
     }
 
+    #[must_use]
+    pub fn with_timeout(&self, timeout: Duration) -> Self {
+        Self {
+            config: self.config.clone().with_timeout(timeout),
+        }
+    }
+
     pub async fn request_json<T>(&self, path: &str) -> Result<T>
     where
         T: DeserializeOwned,

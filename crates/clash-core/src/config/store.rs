@@ -9,8 +9,8 @@ use crate::{
         ClashInfo, IAppSettings, IClashTemp, IProfiles, LocalProfileImport, PrfItem, PrfOption, RemoteProfileImport,
         dns,
         profiles::{
-            GLOBAL_PROFILE_DEFAULTS, download_remote_profile, generate_local_uid, generate_remote_uid,
-            remote_profile_name_override_for_update, validate_profile_uid, validate_profile_yaml,
+            GLOBAL_PROFILE_DEFAULTS, RemoteProfileDownload, download_remote_profile, generate_local_uid,
+            generate_remote_uid, remote_profile_name_override_for_update, validate_profile_uid, validate_profile_yaml,
         },
     },
     validation::{ValidationOutcome, ValidationSkipReason},
@@ -50,6 +50,13 @@ impl ConfigLoadResult {
 #[derive(Debug, Clone)]
 pub struct ConfigStore {
     paths: AppPaths,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteProfileUpdatePlan {
+    pub uid: String,
+    pub request: RemoteProfileImport,
+    pub option: Option<PrfOption>,
 }
 
 impl ConfigStore {
@@ -292,7 +299,15 @@ impl ConfigStore {
     pub async fn import_remote_profile(&self, input: &RemoteProfileImport) -> Result<IProfiles> {
         self.paths.ensure_dirs()?;
         let remote = download_remote_profile(input).await?;
+        self.commit_remote_profile_import(input, remote).await
+    }
 
+    pub async fn commit_remote_profile_import(
+        &self,
+        input: &RemoteProfileImport,
+        remote: RemoteProfileDownload,
+    ) -> Result<IProfiles> {
+        self.paths.ensure_dirs()?;
         let mut profiles = self.load_profiles().await.unwrap_or_default();
         let uid = match input.uid.as_deref().filter(|uid| !uid.trim().is_empty()) {
             Some(uid) => uid.to_owned(),
@@ -331,38 +346,63 @@ impl ConfigStore {
     }
 
     pub async fn update_remote_profile(&self, uid: &str, option: Option<&PrfOption>) -> Result<IProfiles> {
+        let plan = self.prepare_remote_profile_update(uid, option).await?;
+        let remote = download_remote_profile(&plan.request).await?;
+        self.commit_remote_profile_update(&plan, remote).await
+    }
+
+    pub async fn prepare_remote_profile_update(
+        &self,
+        uid: &str,
+        option: Option<&PrfOption>,
+    ) -> Result<RemoteProfileUpdatePlan> {
         self.paths.ensure_dirs()?;
-        let mut profiles = self.load_profiles().await?;
+        let profiles = self.load_profiles().await?;
         let item = profiles.get_item(uid)?.clone();
         if item.itype.as_deref() != Some("remote") {
             bail!("profile \"uid:{uid}\" is not remote");
         }
         let url = item.url.clone().context("remote profile url is missing")?;
         let option = PrfOption::merge(item.option.as_ref(), option);
-        let remote = download_remote_profile(&RemoteProfileImport {
-            url: url.clone(),
-            uid: Some(uid.to_owned()),
-            name: remote_profile_name_override_for_update(item.name.as_deref(), &url),
-            desc: item.desc.clone(),
-            option: option.clone(),
+        Ok(RemoteProfileUpdatePlan {
+            uid: uid.to_owned(),
+            request: RemoteProfileImport {
+                url: url.clone(),
+                uid: Some(uid.to_owned()),
+                name: remote_profile_name_override_for_update(item.name.as_deref(), &url),
+                desc: item.desc.clone(),
+                option: option.clone(),
+            },
+            option,
         })
-        .await?;
+    }
 
-        let file = item.file.clone().unwrap_or_else(|| format!("{uid}.yaml"));
+    pub async fn commit_remote_profile_update(
+        &self,
+        plan: &RemoteProfileUpdatePlan,
+        remote: RemoteProfileDownload,
+    ) -> Result<IProfiles> {
+        self.paths.ensure_dirs()?;
+        let mut profiles = self.load_profiles().await?;
+        let item = profiles.get_item(&plan.uid)?.clone();
+        if item.itype.as_deref() != Some("remote") {
+            bail!("profile \"uid:{}\" is not remote", plan.uid);
+        }
+        let file = item.file.clone().unwrap_or_else(|| format!("{}.yaml", plan.uid));
         let path = self.paths.profiles_dir.join(&file);
         tokio::fs::write(&path, &remote.file_data)
             .await
             .with_context(|| format!("failed to write profile {}", path.display()))?;
 
         profiles.patch_item(
-            uid,
+            &plan.uid,
             &PrfItem {
                 name: Some(remote.name),
                 file: Some(file),
                 url: Some(remote.url),
                 extra: remote.extra,
                 updated: Some(current_timestamp_secs()),
-                option: Some(merge_remote_option(option.as_ref(), remote.update_interval)),
+                option: Some(merge_remote_option(plan.option.as_ref(), remote.update_interval)),
                 home: remote.home,
                 ..PrfItem::default()
             },

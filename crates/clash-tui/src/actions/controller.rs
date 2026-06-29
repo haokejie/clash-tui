@@ -17,10 +17,10 @@ use crate::{
         RulesResponse,
     },
     state::AppState,
+    timeouts,
 };
 
 const OFFLINE_PRESELECT_EMPTY: &str = "未预选";
-const SELECTION_APPLY_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -319,25 +319,36 @@ pub async fn apply_saved_proxy_selections_with_retry(
     timeout_duration: Duration,
 ) -> ProxySelectionApplyReport {
     let deadline = Instant::now() + timeout_duration;
+    let mut retry_attempt = 0;
     loop {
         match apply_saved_proxy_selections_once(state).await {
             Ok(report) => return report,
-            Err(err) if controller_error_allows_offline_preselect(&err) && Instant::now() < deadline => {
-                sleep(SELECTION_APPLY_RETRY_INTERVAL).await;
+            Err(err) if controller_error_allows_offline_preselect(&err) => {
+                if Instant::now() >= deadline {
+                    return controller_unavailable_report(err);
+                }
+                let delay = timeouts::saved_proxy_selection_retry_delay(retry_attempt)
+                    .min(deadline.saturating_duration_since(Instant::now()));
+                retry_attempt += 1;
+                sleep(delay).await;
             }
             Err(err) => {
-                return ProxySelectionApplyReport {
-                    controller_unavailable: true,
-                    entries: vec![ProxySelectionApplyEntry {
-                        group: "-".into(),
-                        proxy: "-".into(),
-                        status: "controller-unavailable".into(),
-                        message: Some(err.to_string()),
-                    }],
-                    ..ProxySelectionApplyReport::default()
-                };
+                return controller_unavailable_report(err);
             }
         }
+    }
+}
+
+fn controller_unavailable_report(err: anyhow::Error) -> ProxySelectionApplyReport {
+    ProxySelectionApplyReport {
+        controller_unavailable: true,
+        entries: vec![ProxySelectionApplyEntry {
+            group: "-".into(),
+            proxy: "-".into(),
+            status: "controller-unavailable".into(),
+            message: Some(err.to_string()),
+        }],
+        ..ProxySelectionApplyReport::default()
     }
 }
 

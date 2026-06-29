@@ -32,6 +32,12 @@ pub mod network {
     }
 }
 
+pub mod timeouts {
+    use std::time::Duration;
+
+    pub const REMOTE_PROFILE_DOWNLOAD: Duration = Duration::from_secs(30);
+}
+
 pub mod tun {
     pub const DEFAULT_STACK: &str = "gvisor";
     pub const DNS_HIJACK: &[&str] = &["any:53"];

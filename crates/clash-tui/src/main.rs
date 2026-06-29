@@ -13,6 +13,7 @@ mod state;
 mod subscriptions;
 mod system_info;
 mod terminal_display;
+mod timeouts;
 mod tui;
 mod validation;
 

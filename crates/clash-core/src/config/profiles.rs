@@ -15,9 +15,10 @@ use reqwest::header::{CONTENT_DISPOSITION, HeaderMap};
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::{Mapping, Value};
 
-use crate::{constants::network, yaml};
-
-const DEFAULT_REMOTE_TIMEOUT: Duration = Duration::from_secs(20);
+use crate::{
+    constants::{network, timeouts},
+    yaml,
+};
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -436,7 +437,7 @@ pub async fn download_remote_profile(input: &RemoteProfileImport) -> Result<Remo
     let timeout = option
         .and_then(|option| option.timeout_seconds)
         .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_REMOTE_TIMEOUT);
+        .unwrap_or(timeouts::REMOTE_PROFILE_DOWNLOAD);
 
     let mut builder = reqwest::Client::builder().timeout(timeout);
     if option.is_some_and(|option| option.danger_accept_invalid_certs.unwrap_or(false)) {

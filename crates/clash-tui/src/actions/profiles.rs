@@ -1,20 +1,20 @@
-use std::{
-    collections::BTreeSet,
-    path::{Component, Path, PathBuf},
-    sync::Arc,
-    time::Duration,
+use std::sync::Arc;
+
+use anyhow::{Context as _, Result, bail};
+use clash_core::{
+    IProfiles, LocalProfileImport, PrfItem, PrfOption, RemoteProfileImport,
+    config::profiles::{RemoteProfileDownload, download_remote_profile, generate_remote_uid},
 };
-
-use anyhow::{Context as _, Result, anyhow, bail};
-use clash_core::{IProfiles, KernelState, LocalProfileImport, PrfItem, PrfOption, RemoteProfileImport};
 use serde::{Deserialize, Serialize};
-use tokio::time::timeout;
 
-use crate::state::AppState;
-
-const PROFILE_SWITCH_TIMEOUT: Duration = Duration::from_secs(30);
-const APPLY_SAVED_SELECTION_TIMEOUT: Duration = Duration::from_secs(8);
-const START_CORE_RELOAD_CONTROLLER_READY_TIMEOUT: Duration = Duration::from_secs(20);
+use crate::{
+    actions::profile_transaction::{
+        ProfileSnapshotSpec, ProfileTransactionLock, ProfileTransactionSpec, RuntimeCommitOptions, RuntimePolicy,
+        run_profile_transaction,
+    },
+    state::AppState,
+    timeouts,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,6 +64,29 @@ pub struct RemoteImportAttempt {
     pub self_proxy: bool,
 }
 
+#[derive(Debug, Clone)]
+struct PreparedRemoteImport {
+    input: RemoteProfileImport,
+    remote: RemoteProfileDownload,
+    attempt: RemoteImportAttempt,
+}
+
+#[derive(Debug, Clone)]
+struct ProfileSwitchMutation {
+    previous: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteImportActivationMutation {
+    previous: Option<String>,
+    import_profiles: IProfiles,
+}
+
+#[derive(Debug, Clone)]
+struct ProfileDeleteMutation {
+    previous: Option<String>,
+}
+
 pub async fn list(state: &AppState) -> Result<IProfiles> {
     let profiles = state.store.load_profiles().await?;
     state.config.write().await.profiles = profiles.clone();
@@ -84,13 +107,30 @@ pub async fn import_local(state: &AppState, input: &LocalProfileImport) -> Resul
     Ok(profiles)
 }
 
-pub async fn import_remote(state: &AppState, input: &RemoteProfileImport) -> Result<IProfiles> {
-    let profiles = state.store.import_remote_profile(input).await?;
-    state.config.write().await.profiles = profiles.clone();
-    Ok(profiles)
+pub async fn import_remote_with_retry(state: &AppState, input: &RemoteProfileImport) -> Result<RemoteImportResult> {
+    let prepared = download_remote_with_retry(input).await?;
+    let uid = prepared
+        .input
+        .uid
+        .clone()
+        .context("remote import requires a generated uid")?;
+    let attempt = prepared.attempt.clone();
+    let outcome = run_profile_transaction(state, import_transaction_spec(uid), move |_before| async move {
+        state
+            .store
+            .commit_remote_profile_import(&prepared.input, prepared.remote)
+            .await
+    })
+    .await?;
+
+    Ok(RemoteImportResult {
+        profiles: outcome.profiles,
+        attempt,
+    })
 }
 
-pub async fn import_remote_with_retry(state: &AppState, input: &RemoteProfileImport) -> Result<RemoteImportResult> {
+async fn download_remote_with_retry(input: &RemoteProfileImport) -> Result<PreparedRemoteImport> {
+    let base_input = remote_import_input_with_uid(input);
     let attempts = [
         ("direct", "直连", Some(false), Some(false)),
         ("clash-proxy", "Clash 代理", Some(false), Some(true)),
@@ -99,12 +139,13 @@ pub async fn import_remote_with_retry(state: &AppState, input: &RemoteProfileImp
     let mut errors = Vec::new();
 
     for (strategy, label, with_proxy, self_proxy) in attempts {
-        let mut attempt_input = input.clone();
+        let mut attempt_input = base_input.clone();
         attempt_input.option = Some(import_proxy_option(input.option.as_ref(), with_proxy, self_proxy));
-        match import_remote(state, &attempt_input).await {
-            Ok(profiles) => {
-                return Ok(RemoteImportResult {
-                    profiles,
+        match download_remote_profile(&attempt_input).await {
+            Ok(remote) => {
+                return Ok(PreparedRemoteImport {
+                    input: attempt_input,
+                    remote,
                     attempt: RemoteImportAttempt {
                         strategy: strategy.into(),
                         label: label.into(),
@@ -125,32 +166,75 @@ pub async fn import_remote_with_retry_and_activate(
     input: &RemoteProfileImport,
     start_core: bool,
 ) -> Result<RemoteImportActivatedResult> {
-    let requested_uid = input
+    let prepared = download_remote_with_retry(input).await?;
+    let requested_uid = prepared
+        .input
         .uid
-        .as_deref()
-        .filter(|uid| !uid.trim().is_empty())
+        .clone()
         .context("activated remote import requires a generated uid")?;
-    let rollback = ProfileStoreBackup::capture_import_target(&state, requested_uid).await?;
-    let import = import_remote_with_retry(&state, input).await?;
-    let imported_uid = imported_profile_uid(&import.profiles, Some(requested_uid))
-        .context("imported remote profile uid was not found")?;
+    let attempt = prepared.attempt.clone();
+    let runtime_options = activation_runtime_options(start_core);
+    let mutation_state = Arc::clone(&state);
+    let requested_uid_for_mutation = requested_uid.clone();
+    let outcome = run_profile_transaction(
+        state.as_ref(),
+        ProfileTransactionSpec {
+            failure_context: "remote profile activation failed after import",
+            rollback_success_message: "imported profile was rolled back",
+            rollback_failed_message: "imported profile rollback failed",
+            lock: ProfileTransactionLock::Try,
+            snapshot: ProfileSnapshotSpec::ImportTarget {
+                uid: requested_uid.clone(),
+            },
+            runtime: RuntimePolicy::Always(runtime_options),
+        },
+        move |before| async move {
+            let previous = before.current.clone();
+            let import_profiles = mutation_state
+                .store
+                .commit_remote_profile_import(&prepared.input, prepared.remote)
+                .await?;
+            let imported_uid = imported_profile_uid(&import_profiles, Some(&requested_uid_for_mutation))
+                .context("imported remote profile uid was not found")?;
+            mutation_state.store.switch_profile(&imported_uid).await?;
+            Ok(RemoteImportActivationMutation {
+                previous,
+                import_profiles,
+            })
+        },
+    )
+    .await?;
+    let runtime = outcome
+        .runtime
+        .context("remote profile activation did not apply runtime")?;
+    let imported_uid = requested_uid;
+    let import = RemoteImportResult {
+        profiles: outcome.output.import_profiles,
+        attempt,
+    };
+    let activation = ProfileSwitchResult {
+        requested: imported_uid.clone(),
+        previous: outcome.output.previous,
+        profiles: outcome.profiles,
+        runtime_path: runtime.apply.runtime_path,
+        runtime_validated: runtime.apply.runtime_validated,
+        runtime_reloaded: runtime.apply.runtime_reloaded,
+        started_core: runtime.started_core,
+    };
 
-    match activate(Arc::clone(&state), imported_uid.clone(), start_core).await {
-        Ok(activation) => Ok(RemoteImportActivatedResult {
-            imported_uid,
-            import,
-            activation,
-        }),
-        Err(err) => {
-            let rollback_message = match restore_profile_store_backup(&state, &rollback).await {
-                Ok(()) => "imported profile was rolled back".to_owned(),
-                Err(rollback_err) => format!("imported profile rollback failed: {rollback_err}"),
-            };
-            Err(err.context(format!(
-                "remote profile activation failed after import; {rollback_message}"
-            )))
-        }
+    Ok(RemoteImportActivatedResult {
+        imported_uid,
+        import,
+        activation,
+    })
+}
+
+fn remote_import_input_with_uid(input: &RemoteProfileImport) -> RemoteProfileImport {
+    let mut input = input.clone();
+    if input.uid.as_deref().is_none_or(|uid| uid.trim().is_empty()) {
+        input.uid = Some(generate_remote_uid());
     }
+    input
 }
 
 fn import_proxy_option(base: Option<&PrfOption>, with_proxy: Option<bool>, self_proxy: Option<bool>) -> PrfOption {
@@ -181,69 +265,39 @@ pub async fn switch(state: Arc<AppState>, uid: String) -> Result<ProfileSwitchRe
 }
 
 pub async fn activate(state: Arc<AppState>, uid: String, start_core: bool) -> Result<ProfileSwitchResult> {
-    let Ok(_guard) = state.profile_switch_lock.try_lock() else {
-        bail!("profile switch is already running");
-    };
-
-    let before = state.store.load_profiles().await?;
-    let previous = before.current.clone();
-    before
-        .get_item(&uid)
-        .with_context(|| format!("profile \"uid:{uid}\" not found"))?;
-
-    let result = timeout(PROFILE_SWITCH_TIMEOUT, async {
-        let profiles = state.store.switch_profile(&uid).await?;
-        state.config.write().await.profiles = profiles.clone();
-
-        let runtime_options = if start_core {
-            super::runtime_apply::RuntimeApplyOptions {
-                controller_ready_timeout: START_CORE_RELOAD_CONTROLLER_READY_TIMEOUT,
-            }
-        } else {
-            super::runtime_apply::RuntimeApplyOptions::default()
-        };
-        let runtime_apply =
-            super::runtime_apply::generate_validate_and_apply_with_options(&state, runtime_options).await?;
-        let started_core = if start_core
-            && matches!(runtime_apply.core_state, KernelState::Stopped | KernelState::Crashed)
-        {
-            super::core::start(state.as_ref()).await?;
-            let _ =
-                super::controller::apply_saved_proxy_selections_with_retry(&state, APPLY_SAVED_SELECTION_TIMEOUT).await;
-            true
-        } else {
-            false
-        };
-
-        Ok::<_, anyhow::Error>(ProfileSwitchResult {
-            requested: uid.clone(),
-            previous: previous.clone(),
-            profiles,
-            runtime_path: runtime_apply.runtime_path,
-            runtime_validated: runtime_apply.runtime_validated,
-            runtime_reloaded: runtime_apply.runtime_reloaded,
-            started_core,
-        })
-    })
-    .await;
-
-    match result {
-        Ok(Ok(result)) => Ok(result),
-        Ok(Err(err)) => match rollback_profile(&state, previous.as_deref()).await {
-            Ok(()) => Err(err.context("profile switch failed and was rolled back")),
-            Err(rollback_err) => Err(err.context(format!("profile switch failed and rollback failed: {rollback_err}"))),
+    let requested = uid.clone();
+    let mutation_state = Arc::clone(&state);
+    let outcome = run_profile_transaction(
+        state.as_ref(),
+        ProfileTransactionSpec {
+            failure_context: "profile switch failed",
+            rollback_success_message: "was rolled back",
+            rollback_failed_message: "rollback failed",
+            lock: ProfileTransactionLock::Try,
+            snapshot: ProfileSnapshotSpec::ProfilesConfig,
+            runtime: RuntimePolicy::Always(activation_runtime_options(start_core)),
         },
-        Err(_) => {
-            let timeout_err = anyhow!(
-                "profile switch timed out after {}s and was rolled back",
-                PROFILE_SWITCH_TIMEOUT.as_secs()
-            );
-            match rollback_profile(&state, previous.as_deref()).await {
-                Ok(()) => Err(timeout_err),
-                Err(rollback_err) => Err(timeout_err.context(format!("rollback failed: {rollback_err}"))),
-            }
-        }
-    }
+        move |before| async move {
+            before
+                .get_item(&uid)
+                .with_context(|| format!("profile \"uid:{uid}\" not found"))?;
+            let previous = before.current.clone();
+            mutation_state.store.switch_profile(&uid).await?;
+            Ok(ProfileSwitchMutation { previous })
+        },
+    )
+    .await?;
+    let runtime = outcome.runtime.context("profile switch did not apply runtime")?;
+
+    Ok(ProfileSwitchResult {
+        requested,
+        previous: outcome.output.previous,
+        profiles: outcome.profiles,
+        runtime_path: runtime.apply.runtime_path,
+        runtime_validated: runtime.apply.runtime_validated,
+        runtime_reloaded: runtime.apply.runtime_reloaded,
+        started_core: runtime.started_core,
+    })
 }
 
 #[must_use]
@@ -262,222 +316,69 @@ pub fn imported_profile_uid(profiles: &IProfiles, requested_uid: Option<&str>) -
 }
 
 pub async fn delete(state: &AppState, uid: &str) -> Result<ProfileDeleteResult> {
-    let Ok(_guard) = state.profile_switch_lock.try_lock() else {
-        bail!("profile switch is already running");
-    };
-
-    let before = state.store.load_profiles().await?;
-    let previous = before.current.clone();
-    before
-        .get_item(uid)
-        .with_context(|| format!("profile \"uid:{uid}\" not found"))?;
-    let deleting_current = previous.as_deref() == Some(uid);
-    let backup = if deleting_current {
-        Some(ProfileStoreBackup::capture(state, &before, uid).await?)
-    } else {
-        None
-    };
-    let next_uid = deleting_current
-        .then(|| next_profile_uid_after_delete(&before, uid))
-        .flatten();
-    let mut runtime_path = None;
-    let mut runtime_validated = false;
-    let mut runtime_reloaded = false;
-    let warning = None;
-
-    let profiles = if let Some(next_uid) = next_uid {
-        let switched_profiles = state.store.switch_profile(&next_uid).await?;
-        state.config.write().await.profiles = switched_profiles;
-        match super::runtime_apply::generate_validate_and_apply(state).await {
-            Ok(apply) => {
-                runtime_path = Some(apply.runtime_path);
-                runtime_validated = apply.runtime_validated;
-                runtime_reloaded = apply.runtime_reloaded;
-            }
-            Err(err) => {
-                rollback_profile(state, previous.as_deref()).await?;
-                return Err(err.context("profile delete failed and was rolled back"));
-            }
-        }
-        let profiles = state.store.delete_profile(uid).await?;
-        state.config.write().await.profiles = profiles.clone();
-        profiles
-    } else {
-        let profiles = state.store.delete_profile(uid).await?;
-        state.config.write().await.profiles = profiles.clone();
-        if deleting_current {
-            match super::runtime_apply::generate_validate_and_apply(state).await {
-                Ok(apply) => {
-                    runtime_path = Some(apply.runtime_path);
-                    runtime_validated = apply.runtime_validated;
-                    runtime_reloaded = apply.runtime_reloaded;
-                }
-                Err(err) => {
-                    if let Some(backup) = backup.as_ref() {
-                        restore_delete_backup(state, backup).await?;
-                    }
-                    return Err(err.context("profile delete failed and was rolled back"));
-                }
-            }
-        }
-        profiles
-    };
-    let current_changed = deleting_current && previous != profiles.current;
+    let uid = uid.to_owned();
+    let outcome = run_profile_transaction(
+        state,
+        ProfileTransactionSpec {
+            failure_context: "profile delete failed",
+            rollback_success_message: "was rolled back",
+            rollback_failed_message: "rollback failed",
+            lock: ProfileTransactionLock::Try,
+            snapshot: ProfileSnapshotSpec::ProfileWithOptionFiles { uid: uid.clone() },
+            runtime: RuntimePolicy::IfCurrentWas {
+                uid: uid.clone(),
+                options: RuntimeCommitOptions::apply_only(super::runtime_apply::RuntimeApplyOptions::default()),
+            },
+        },
+        move |before| async move {
+            before
+                .get_item(&uid)
+                .with_context(|| format!("profile \"uid:{uid}\" not found"))?;
+            let previous = before.current.clone();
+            state.store.delete_profile(&uid).await?;
+            Ok(ProfileDeleteMutation { previous })
+        },
+    )
+    .await?;
+    let runtime = outcome.runtime;
+    let previous = outcome.output.previous;
+    let current_changed = previous != outcome.profiles.current && previous.is_some();
 
     Ok(ProfileDeleteResult {
         previous,
-        profiles,
+        profiles: outcome.profiles,
         current_changed,
-        runtime_path,
-        runtime_validated,
-        runtime_reloaded,
-        warning,
+        runtime_path: runtime.as_ref().map(|runtime| runtime.apply.runtime_path.clone()),
+        runtime_validated: runtime.as_ref().is_some_and(|runtime| runtime.apply.runtime_validated),
+        runtime_reloaded: runtime.as_ref().is_some_and(|runtime| runtime.apply.runtime_reloaded),
+        warning: None,
     })
 }
 
-async fn rollback_profile(state: &AppState, previous: Option<&str>) -> Result<()> {
-    if let Some(previous) = previous {
-        let profiles = state.store.switch_profile(previous).await?;
-        state.config.write().await.profiles = profiles;
-        state.runtime.generate().await?;
+fn import_transaction_spec(uid: String) -> ProfileTransactionSpec {
+    ProfileTransactionSpec {
+        failure_context: "remote profile import failed",
+        rollback_success_message: "imported profile was rolled back",
+        rollback_failed_message: "imported profile rollback failed",
+        lock: ProfileTransactionLock::Try,
+        snapshot: ProfileSnapshotSpec::ImportTarget { uid },
+        runtime: RuntimePolicy::Never,
     }
-    Ok(())
 }
 
-async fn restore_delete_backup(state: &AppState, backup: &ProfileStoreBackup) -> Result<()> {
-    restore_profile_store_backup(state, backup).await
-}
-
-async fn restore_profile_store_backup(state: &AppState, backup: &ProfileStoreBackup) -> Result<()> {
-    backup.restore().await?;
-    let profiles = state.store.load_profiles().await?;
-    state.config.write().await.profiles = profiles;
-    state.runtime.generate().await?;
-    Ok(())
-}
-
-fn next_profile_uid_after_delete(profiles: &IProfiles, uid: &str) -> Option<String> {
-    profiles
-        .items
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .find(|item| item.uid.as_deref() != Some(uid) && matches!(item.itype.as_deref(), Some("remote" | "local")))
-        .and_then(|item| item.uid.clone())
-}
-
-#[derive(Debug, Clone)]
-struct ProfileStoreBackup {
-    profiles_config_path: PathBuf,
-    profiles_config: Option<Vec<u8>>,
-    profile_files: Vec<(PathBuf, Option<Vec<u8>>)>,
-}
-
-impl ProfileStoreBackup {
-    async fn capture_import_target(state: &AppState, uid: &str) -> Result<Self> {
-        let profile_file = format!("{uid}.yaml");
-        let profile_file_path = profile_file_path(state, &profile_file)?;
-        let profiles_config_path = state.store.paths().profiles_config.clone();
-        Ok(Self {
-            profiles_config: read_optional_file(&profiles_config_path).await?,
-            profiles_config_path,
-            profile_files: vec![(profile_file_path.clone(), read_optional_file(&profile_file_path).await?)],
-        })
-    }
-
-    async fn capture(state: &AppState, profiles: &IProfiles, uid: &str) -> Result<Self> {
-        let mut uids = BTreeSet::new();
-        uids.insert(uid.to_owned());
-        if let Ok(item) = profiles.get_item(uid)
-            && let Some(option) = item.option.as_ref()
-        {
-            for option_uid in [
-                option.merge.as_deref(),
-                option.script.as_deref(),
-                option.rules.as_deref(),
-                option.proxies.as_deref(),
-                option.groups.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                uids.insert(option_uid.to_owned());
-            }
+fn activation_runtime_options(start_core: bool) -> RuntimeCommitOptions {
+    let apply_options = if start_core {
+        super::runtime_apply::RuntimeApplyOptions {
+            controller_ready_timeout: timeouts::START_CORE_RELOAD_CONTROLLER_READY_TIMEOUT,
         }
-
-        let mut profile_files = Vec::new();
-        for backup_uid in uids {
-            let Ok(item) = profiles.get_item(&backup_uid) else {
-                continue;
-            };
-            let Some(file) = item.file.as_deref() else {
-                continue;
-            };
-            let path = profile_file_path(state, file)?;
-            profile_files.push((path.clone(), read_optional_file(&path).await?));
-        }
-
-        let profiles_config_path = state.store.paths().profiles_config.clone();
-        Ok(Self {
-            profiles_config: read_optional_file(&profiles_config_path).await?,
-            profiles_config_path,
-            profile_files,
-        })
-    }
-
-    async fn restore(&self) -> Result<()> {
-        restore_optional_file(&self.profiles_config_path, self.profiles_config.as_deref()).await?;
-        for (path, content) in &self.profile_files {
-            restore_optional_file(path, content.as_deref()).await?;
-        }
-        Ok(())
-    }
-}
-
-fn profile_file_path(state: &AppState, file: &str) -> Result<PathBuf> {
-    let relative = Path::new(file);
-    if file.trim().is_empty() || relative.is_absolute() {
-        bail!("invalid profile file path");
-    }
-
-    let mut components = relative.components();
-    let Some(Component::Normal(name)) = components.next() else {
-        bail!("invalid profile file path");
+    } else {
+        super::runtime_apply::RuntimeApplyOptions::default()
     };
-    if components.next().is_some() {
-        bail!("profile file path must not contain directories");
+    if start_core {
+        RuntimeCommitOptions::with_start_core(apply_options)
+    } else {
+        RuntimeCommitOptions::apply_only(apply_options)
     }
-
-    Ok(state.store.paths().profiles_dir.join(name))
-}
-
-async fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
-    match tokio::fs::read(path).await {
-        Ok(content) => Ok(Some(content)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("failed to read {}", path.display())),
-    }
-}
-
-async fn restore_optional_file(path: &Path, content: Option<&[u8]>) -> Result<()> {
-    match content {
-        Some(content) => {
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
-            tokio::fs::write(path, content)
-                .await
-                .with_context(|| format!("failed to restore {}", path.display()))?;
-        }
-        None => match tokio::fs::remove_file(path).await {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err).with_context(|| format!("failed to remove {}", path.display())),
-        },
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -495,7 +396,11 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt as _, AsyncWriteExt as _},
         net::TcpListener,
+        sync::mpsc,
     };
+
+    #[cfg(unix)]
+    use tokio::net::UnixListener;
 
     use crate::{options::ClashTuiOptions, state::AppState};
 
@@ -600,7 +505,7 @@ mod tests {
     async fn import_remote_activation_failure_restores_previous_current_and_removes_import() {
         let root = temp_root("import-activate-rollback-previous");
         let _ = fs::remove_dir_all(&root);
-        install_failing_mihomo(&root);
+        install_rejecting_direct_node_mihomo(&root);
         let options =
             ClashTuiOptions::new(Some(root.clone()), Some(root.join("resources")), None, 300).expect("options");
         let state = AppState::initialize(options).await.expect("state");
@@ -629,7 +534,10 @@ mod tests {
         .await
         .expect_err("activation should fail");
 
-        assert!(err.to_string().contains("imported profile was rolled back"));
+        assert!(
+            err.to_string().contains("imported profile was rolled back"),
+            "unexpected error: {err:#}"
+        );
         let profiles = state.store.load_profiles().await.expect("profiles");
         assert_eq!(profiles.current.as_deref(), Some("Lone"));
         assert!(profiles.get_item("Rtxn").is_err());
@@ -647,7 +555,7 @@ mod tests {
     async fn first_import_remote_activation_failure_restores_empty_current() {
         let root = temp_root("import-activate-rollback-empty");
         let _ = fs::remove_dir_all(&root);
-        install_failing_mihomo(&root);
+        install_rejecting_direct_node_mihomo(&root);
         let options =
             ClashTuiOptions::new(Some(root.clone()), Some(root.join("resources")), None, 300).expect("options");
         let state = AppState::initialize(options).await.expect("state");
@@ -667,11 +575,76 @@ mod tests {
         .await
         .expect_err("activation should fail");
 
-        assert!(err.to_string().contains("imported profile was rolled back"));
+        assert!(
+            err.to_string().contains("imported profile was rolled back"),
+            "unexpected error: {err:#}"
+        );
         let profiles = state.store.load_profiles().await.expect("profiles");
         assert_eq!(profiles.current, None);
         assert!(profiles.get_item("Rfirst").is_err());
         assert!(!root.join("profiles").join("Rfirst.yaml").exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn import_remote_activation_failure_reloads_restored_runtime_when_core_is_active() {
+        let root = short_temp_root("rollback-reload");
+        let _ = fs::remove_dir_all(&root);
+        install_rejecting_direct_node_mihomo(&root);
+        let options =
+            ClashTuiOptions::new(Some(root.clone()), Some(root.join("resources")), None, 300).expect("options");
+        let state = AppState::initialize(options).await.expect("state");
+        state
+            .store
+            .import_local_profile(&LocalProfileImport {
+                uid: Some("Lone".into()),
+                name: Some("One".into()),
+                file_data: "proxies:\n  - name: PREVIOUS-NODE\n    type: direct\nproxy-groups:\n  - name: Previous\n    type: select\n    proxies:\n      - PREVIOUS-NODE\nrules:\n  - MATCH,Previous\n".into(),
+            })
+            .await
+            .expect("previous profile");
+
+        let (reload_tx, mut reload_rx) = mpsc::channel(8);
+        let controller = spawn_fake_controller(state.store.paths().ipc_path.clone(), reload_tx).await;
+        tokio::fs::write(
+            state.store.paths().home_dir.join("mihomo.pid"),
+            std::process::id().to_string(),
+        )
+        .await
+        .expect("pid file");
+
+        let url = serve_remote_profile(valid_remote_profile()).await;
+        let err = super::import_remote_with_retry_and_activate(
+            Arc::clone(&state),
+            &RemoteProfileImport {
+                url,
+                uid: Some("Rtxn".into()),
+                name: None,
+                desc: None,
+                option: None,
+            },
+            false,
+        )
+        .await
+        .expect_err("activation should fail");
+
+        assert!(
+            err.to_string().contains("imported profile was rolled back"),
+            "unexpected error: {err:#}"
+        );
+        let reloaded_path = tokio::time::timeout(std::time::Duration::from_secs(2), reload_rx.recv())
+            .await
+            .expect("rollback should reload restored runtime")
+            .expect("reload path");
+        assert_eq!(reloaded_path, state.store.paths().runtime_config.to_string_lossy());
+        let runtime = tokio::fs::read_to_string(&state.store.paths().runtime_config)
+            .await
+            .expect("runtime");
+        assert!(runtime.contains("PREVIOUS-NODE"));
+        assert!(!runtime.contains("DIRECT-NODE"));
+        controller.abort();
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -759,6 +732,15 @@ mod tests {
         std::env::temp_dir().join(format!("clash-tui-{name}-{}-{nanos}", std::process::id()))
     }
 
+    #[cfg(unix)]
+    fn short_temp_root(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::path::PathBuf::from(format!("/tmp/ctui-{name}-{}-{nanos}", std::process::id()))
+    }
+
     fn install_fake_mihomo(root: &Path) {
         let resources = root.join("resources");
         fs::create_dir_all(&resources).expect("resources");
@@ -777,13 +759,31 @@ mod tests {
         }
     }
 
-    fn install_failing_mihomo(root: &Path) {
+    fn install_rejecting_direct_node_mihomo(root: &Path) {
         let resources = root.join("resources");
         fs::create_dir_all(&resources).expect("resources");
         let mihomo = resources.join("mihomo");
         fs::write(
             &mihomo,
-            "#!/bin/sh\nif [ \"$1\" = \"-t\" ]; then printf 'validation failed\\n' >&2; exit 1; fi\nprintf 'Mihomo Meta vtest\\n'\n",
+            r#"#!/bin/sh
+if [ "$1" = "-t" ]; then
+  config=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-f" ]; then
+      shift
+      config="$1"
+      break
+    fi
+    shift
+  done
+  if [ -n "$config" ] && grep -q "DIRECT-NODE" "$config"; then
+    printf 'validation failed for imported runtime\n' >&2
+    exit 1
+  fi
+  exit 0
+fi
+printf 'Mihomo Meta vtest\n'
+"#,
         )
         .expect("fake mihomo");
         #[cfg(unix)]
@@ -793,6 +793,56 @@ mod tests {
             permissions.set_mode(0o755);
             fs::set_permissions(&mihomo, permissions).expect("chmod");
         }
+    }
+
+    #[cfg(unix)]
+    async fn spawn_fake_controller(
+        socket_path: std::path::PathBuf,
+        reload_tx: mpsc::Sender<String>,
+    ) -> tokio::task::JoinHandle<()> {
+        if let Some(parent) = socket_path.parent() {
+            tokio::fs::create_dir_all(parent).await.expect("socket parent");
+        }
+        let _ = tokio::fs::remove_file(&socket_path).await;
+        let listener = UnixListener::bind(&socket_path).expect("bind fake controller");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buffer = vec![0_u8; 4096];
+                let Ok(size) = stream.read(&mut buffer).await else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&buffer[..size]);
+                if request.starts_with("GET /version ") {
+                    let body = r#"{"version":"test-controller"}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                } else if request.starts_with("PUT /configs ") {
+                    if let Some(path) = request
+                        .split("\r\n\r\n")
+                        .nth(1)
+                        .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
+                        .and_then(|body| body.get("path").and_then(serde_json::Value::as_str).map(str::to_owned))
+                    {
+                        let _ = reload_tx.try_send(path);
+                    }
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                } else {
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                }
+                let _ = stream.shutdown().await;
+            }
+        })
     }
 
     fn valid_remote_profile() -> &'static str {

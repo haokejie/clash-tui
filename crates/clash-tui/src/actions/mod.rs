@@ -2,6 +2,7 @@ pub mod config;
 pub mod controller;
 pub mod core;
 pub mod diagnose;
+pub mod profile_transaction;
 pub mod profiles;
 pub mod runtime;
 pub mod runtime_apply;

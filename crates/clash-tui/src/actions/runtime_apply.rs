@@ -1,19 +1,15 @@
 use std::{path::Path, time::Duration};
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use clash_core::{KernelState, RuntimeConfigResult, ValidationOutcome};
 use serde::{Deserialize, Serialize};
 use tokio::time::{Instant, sleep};
 
-use crate::{mihomo_controller::MihomoController, state::AppState};
+use crate::{mihomo_controller::MihomoController, state::AppState, timeouts};
 
 use super::controller::ProxySelectionApplyReport;
 
-const APPLY_SAVED_SELECTION_TIMEOUT: Duration = Duration::from_secs(8);
-const RELOAD_CONTROLLER_READY_TIMEOUT: Duration = Duration::from_secs(8);
-const RELOAD_CONTROLLER_READY_INTERVAL: Duration = Duration::from_millis(250);
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeApplyOptions {
     pub controller_ready_timeout: Duration,
 }
@@ -21,7 +17,7 @@ pub struct RuntimeApplyOptions {
 impl Default for RuntimeApplyOptions {
     fn default() -> Self {
         Self {
-            controller_ready_timeout: RELOAD_CONTROLLER_READY_TIMEOUT,
+            controller_ready_timeout: timeouts::RUNTIME_RELOAD_CONTROLLER_READY_TIMEOUT,
         }
     }
 }
@@ -60,8 +56,16 @@ pub async fn validate_and_apply_generated_with_options(
     let reload_attempted = should_reload_runtime(snapshot.state);
     let selection_report = if reload_attempted {
         wait_for_controller_ready(state, options.controller_ready_timeout).await?;
-        super::controller::reload_config(state, &runtime.path, true).await?;
-        Some(super::controller::apply_saved_proxy_selections_with_retry(state, APPLY_SAVED_SELECTION_TIMEOUT).await)
+        super::controller::reload_config(state, &runtime.path, true)
+            .await
+            .context("runtime reload failed")?;
+        Some(
+            super::controller::apply_saved_proxy_selections_with_retry(
+                state,
+                timeouts::SAVED_PROXY_SELECTION_APPLY_TIMEOUT,
+            )
+            .await,
+        )
     } else {
         None
     };
@@ -92,7 +96,7 @@ async fn wait_for_controller_ready(state: &AppState, timeout: Duration) -> Resul
                 health.message.as_deref().unwrap_or("unknown")
             );
         }
-        sleep(RELOAD_CONTROLLER_READY_INTERVAL).await;
+        sleep(timeouts::RUNTIME_RELOAD_CONTROLLER_READY_INTERVAL).await;
     }
 }
 

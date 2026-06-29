@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt, str::FromStr};
+use std::{collections::BTreeMap, fmt, str::FromStr, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
 use clash_mihomo::{MihomoClient as _, MihomoHttpMethod, MihomoJsonStream, SimpleMihomoClient};
@@ -8,6 +8,8 @@ use serde::{
 };
 use serde_json::{Map, Value, json};
 use url::form_urlencoded;
+
+use crate::timeouts;
 
 pub const DEFAULT_PROXY_DELAY_TEST_URL: &str = "http://www.gstatic.com/generate_204";
 pub const DEFAULT_PROXY_DELAY_TEST_TIMEOUT_MILLIS: u64 = 5_000;
@@ -399,10 +401,11 @@ impl MihomoController {
     }
 
     pub async fn reload_config(&self, path: &str, force: bool) -> Result<()> {
-        self.request_json_status(
+        self.request_json_status_with_timeout(
             MihomoHttpMethod::Put,
             "/configs",
             json!({ "path": path, "force": force }),
+            timeouts::RUNTIME_RELOAD_TIMEOUT,
         )
         .await
     }
@@ -511,9 +514,16 @@ impl MihomoController {
             .success_json(path)
     }
 
-    async fn request_json_status(&self, method: MihomoHttpMethod, path: &str, body: Value) -> Result<()> {
+    async fn request_json_status_with_timeout(
+        &self,
+        method: MihomoHttpMethod,
+        path: &str,
+        body: Value,
+        timeout: Duration,
+    ) -> Result<()> {
         let body = serde_json::to_vec(&body).context("failed to encode mihomo request body")?;
         self.client
+            .with_timeout(timeout)
             .request_rest(method, path, body, Some("application/json"))
             .await?
             .success_status(path)
@@ -656,6 +666,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt as _, AsyncWriteExt as _},
         net::TcpListener,
+        time::sleep,
     };
 
     #[test]
@@ -707,6 +718,30 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(body)?;
         assert_eq!(body["path"], "/tmp/clash-tui-runtime.yaml");
         assert_eq!(body["force"], true);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reload_config_uses_dedicated_timeout_instead_of_client_default() -> anyhow::Result<()> {
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut buffer = vec![0_u8; 4096];
+            let _ = stream.read(&mut buffer).await?;
+            sleep(Duration::from_millis(80)).await;
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let client = SimpleMihomoClient::new(MihomoClientConfig::tcp(addr).with_timeout(Duration::from_millis(20)));
+        MihomoController::new(client)
+            .reload_config("/tmp/clash-tui-runtime.yaml", true)
+            .await?;
+
+        server.await??;
         Ok(())
     }
 
