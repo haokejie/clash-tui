@@ -18,6 +18,7 @@ CLAUDE.md
 .vfox/
 .claude
 AGENTS.md
+.codex/
 
 # Codex local task memory
 .task/
