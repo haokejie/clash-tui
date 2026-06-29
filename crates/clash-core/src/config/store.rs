@@ -364,13 +364,14 @@ impl ConfigStore {
         }
         let url = item.url.clone().context("remote profile url is missing")?;
         let option = PrfOption::merge(item.option.as_ref(), option);
+        let name = remote_profile_name_override_for_update(item.name.as_deref(), &url);
         Ok(RemoteProfileUpdatePlan {
             uid: uid.to_owned(),
             request: RemoteProfileImport {
-                url: url.clone(),
+                url,
                 uid: Some(uid.to_owned()),
-                name: remote_profile_name_override_for_update(item.name.as_deref(), &url),
-                desc: item.desc.clone(),
+                name,
+                desc: item.desc,
                 option: option.clone(),
             },
             option,

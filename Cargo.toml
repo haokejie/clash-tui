@@ -48,7 +48,7 @@ split-debuginfo = "unpacked"
 [workspace.dependencies]
 clash-core = { path = "crates/clash-core" }
 clash-mihomo = { path = "crates/clash-mihomo" }
-anyhow = "1.0.102"
+anyhow = "1.0.103"
 tokio = { version = "1.50.0", features = [
   "rt-multi-thread",
   "macros",

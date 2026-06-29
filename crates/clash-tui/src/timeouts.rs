@@ -12,7 +12,7 @@ pub(crate) const SAVED_PROXY_SELECTION_RETRY_STEADY: Duration = Duration::from_s
 
 pub(crate) const SYSTEMD_SETTLE_DELAY: Duration = Duration::from_millis(250);
 
-pub(crate) fn saved_proxy_selection_retry_delay(attempt: usize) -> Duration {
+pub(crate) const fn saved_proxy_selection_retry_delay(attempt: usize) -> Duration {
     match attempt {
         0 => SAVED_PROXY_SELECTION_RETRY_INITIAL,
         1 => SAVED_PROXY_SELECTION_RETRY_SECOND,

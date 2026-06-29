@@ -355,7 +355,7 @@ pub async fn delete(state: &AppState, uid: &str) -> Result<ProfileDeleteResult> 
     })
 }
 
-fn import_transaction_spec(uid: String) -> ProfileTransactionSpec {
+const fn import_transaction_spec(uid: String) -> ProfileTransactionSpec {
     ProfileTransactionSpec {
         failure_context: "remote profile import failed",
         rollback_success_message: "imported profile was rolled back",
