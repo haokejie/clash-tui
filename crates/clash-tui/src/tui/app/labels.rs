@@ -1,4 +1,4 @@
-use clash_core::{KernelOwner, KernelState};
+use clash_core::{KernelOwner, KernelState, RuleProviderDownloadProxy};
 
 use crate::{actions, actions::config::SettingsSummary, jobs::JobStatus, mihomo_controller::Mode};
 
@@ -15,6 +15,7 @@ pub(crate) const fn setting_label(row: SettingRow) -> &'static str {
         SettingRow::TuiPunctuationMode => "中文标点",
         SettingRow::LogLevel => "日志等级",
         SettingRow::CoreLog => "核心日志",
+        SettingRow::RuleProviderDownloadProxy => "规则下载",
         SettingRow::MixedPort => "混合端口",
         SettingRow::ExternalController => "外部控制器",
         SettingRow::ExternalControllerPort => "外部控制端口",
@@ -52,6 +53,9 @@ pub(crate) fn setting_value(row: SettingRow, settings: &SettingsSummary) -> Stri
         }
         SettingRow::LogLevel => settings.log_level.clone(),
         SettingRow::CoreLog => bool_label(settings.core_log_enabled).into(),
+        SettingRow::RuleProviderDownloadProxy => {
+            rule_provider_download_proxy_label(settings.rule_provider_download_proxy).into()
+        }
         SettingRow::MixedPort => settings.mixed_port.to_string(),
         SettingRow::ExternalController => {
             if settings.external_controller.enabled {
@@ -67,6 +71,13 @@ pub(crate) fn setting_value(row: SettingRow, settings: &SettingsSummary) -> Stri
         SettingRow::ExternalControllerPort => settings.external_controller.port.to_string(),
         SettingRow::Tun => bool_label(settings.tun_enabled).into(),
         SettingRow::SystemProxy => bool_label(settings.system_proxy_enabled).into(),
+    }
+}
+
+pub(crate) const fn rule_provider_download_proxy_label(strategy: RuleProviderDownloadProxy) -> &'static str {
+    match strategy {
+        RuleProviderDownloadProxy::Inherit => "跟随配置",
+        RuleProviderDownloadProxy::Direct => "直连",
     }
 }
 

@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, str::FromStr as _, sync::Arc, time::Duration};
 
 use anyhow::{Result, bail};
-use clash_core::{AppPathSummary, IAppSettings, IClashTemp, KernelState, constants::network};
+use clash_core::{AppPathSummary, AppSettings, BaseConfig, KernelState, RuleProviderDownloadProxy, constants::network};
 use serde::Serialize;
 use serde_yaml_ng::{Mapping, Value};
 use tokio::{
@@ -35,6 +35,7 @@ pub struct SettingsSummary {
     pub unified_delay: bool,
     pub log_level: String,
     pub core_log_enabled: bool,
+    pub rule_provider_download_proxy: RuleProviderDownloadProxy,
     pub tun_enabled: bool,
     pub tun_diagnostics: TunDiagnostics,
     pub system_proxy_enabled: bool,
@@ -150,13 +151,13 @@ pub async fn settings(state: &AppState) -> Result<SettingsSummary> {
     ))
 }
 
-pub async fn patch_app_settings(state: &AppState, patch: &IAppSettings) -> Result<IAppSettings> {
+pub async fn patch_app_settings(state: &AppState, patch: &AppSettings) -> Result<AppSettings> {
     let app_settings = state.store.patch_app_settings(patch).await?;
     state.config.write().await.app_settings = app_settings.clone();
     Ok(app_settings)
 }
 
-pub async fn patch_clash(state: &AppState, patch: &Mapping) -> Result<IClashTemp> {
+pub async fn patch_clash(state: &AppState, patch: &Mapping) -> Result<BaseConfig> {
     let clash = state.store.patch_clash(patch).await?;
     state.config.write().await.clash = clash.clone();
     Ok(clash)
@@ -185,15 +186,15 @@ pub async fn set_mode(state: &AppState, mode: Mode) -> Result<Mode> {
 
 pub async fn set_dns_enabled(state: Arc<AppState>, enabled: bool) -> Result<SettingsSummary> {
     let previous = state.store.load_app_settings().await?;
-    let patch = IAppSettings {
+    let patch = AppSettings {
         enable_dns_settings: Some(enabled),
-        ..IAppSettings::default()
+        ..AppSettings::default()
     };
     patch_app_settings(&state, &patch).await?;
     if let Err(err) = crate::validation::apply_dns_config(Arc::clone(&state), enabled).await {
-        let rollback = IAppSettings {
+        let rollback = AppSettings {
             enable_dns_settings: previous.enable_dns_settings,
-            ..IAppSettings::default()
+            ..AppSettings::default()
         };
         let _ = patch_app_settings(&state, &rollback).await;
         bail!("failed to apply DNS config and rolled back switch: {err}");
@@ -224,11 +225,35 @@ pub async fn set_log_level(state: &AppState, level: &str) -> Result<SettingsSumm
 }
 
 pub async fn set_core_log_enabled(state: &AppState, enabled: bool) -> Result<SettingsSummary> {
-    let patch = IAppSettings {
+    let patch = AppSettings {
         enable_core_log: Some(enabled),
-        ..IAppSettings::default()
+        ..AppSettings::default()
     };
     patch_app_settings(state, &patch).await?;
+    settings(state).await
+}
+
+pub async fn set_rule_provider_download_proxy(
+    state: &AppState,
+    strategy: RuleProviderDownloadProxy,
+) -> Result<SettingsSummary> {
+    let previous = state.store.load_app_settings().await?;
+    let patch = AppSettings {
+        rule_provider_download_proxy: Some(strategy),
+        ..AppSettings::default()
+    };
+    patch_app_settings(state, &patch).await?;
+
+    if let Err(err) = super::runtime_apply::generate_validate_and_apply(state).await {
+        let rollback = AppSettings {
+            rule_provider_download_proxy: Some(previous.rule_provider_download_proxy.unwrap_or_default()),
+            ..AppSettings::default()
+        };
+        let _ = patch_app_settings(state, &rollback).await;
+        let _ = super::runtime_apply::generate_validate_and_apply(state).await;
+        bail!("规则 Provider 下载策略应用失败，已回滚：{err}");
+    }
+
     settings(state).await
 }
 
@@ -283,9 +308,9 @@ pub async fn set_mixed_port(state: &AppState, mixed_port: u16) -> Result<Setting
 pub async fn set_external_controller_enabled(state: &AppState, enabled: bool) -> Result<ExternalControllerApplyStatus> {
     apply_external_controller_patch(
         state,
-        IAppSettings {
+        AppSettings {
             enable_external_controller: Some(enabled),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         },
     )
     .await
@@ -303,10 +328,10 @@ pub async fn set_external_controller_port(state: &AppState, port: u16) -> Result
     let enable_external_controller = preserve_external_controller_enabled(&app_settings, runtime.as_ref());
     apply_external_controller_patch(
         state,
-        IAppSettings {
+        AppSettings {
             enable_external_controller,
             external_controller_port: Some(port),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         },
     )
     .await
@@ -315,9 +340,9 @@ pub async fn set_external_controller_port(state: &AppState, port: u16) -> Result
 pub async fn set_tui_display_mode(state: &AppState, mode: TuiDisplayMode) -> Result<SettingsSummary> {
     patch_app_settings(
         state,
-        &IAppSettings {
+        &AppSettings {
             tui_display_mode: Some(mode.config_value().to_owned()),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         },
     )
     .await?;
@@ -327,9 +352,9 @@ pub async fn set_tui_display_mode(state: &AppState, mode: TuiDisplayMode) -> Res
 pub async fn set_tui_punctuation_mode(state: &AppState, mode: TuiPunctuationMode) -> Result<SettingsSummary> {
     patch_app_settings(
         state,
-        &IAppSettings {
+        &AppSettings {
             tui_punctuation_mode: Some(mode.config_value().to_owned()),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         },
     )
     .await?;
@@ -339,9 +364,9 @@ pub async fn set_tui_punctuation_mode(state: &AppState, mode: TuiPunctuationMode
 pub async fn set_tui_theme(state: &AppState, theme: TuiTheme) -> Result<SettingsSummary> {
     patch_app_settings(
         state,
-        &IAppSettings {
+        &AppSettings {
             tui_theme: Some(theme.config_value().to_owned()),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         },
     )
     .await?;
@@ -358,8 +383,8 @@ async fn patch_clash_key(state: &AppState, key: &str, value: Value) -> Result<Se
 fn settings_from_config(
     state: &AppState,
     paths: AppPathSummary,
-    clash: &IClashTemp,
-    app_settings: &IAppSettings,
+    clash: &BaseConfig,
+    app_settings: &AppSettings,
     runtime_external_controller: Option<&RuntimeExternalController>,
     runtime_external_controller_error: Option<String>,
 ) -> SettingsSummary {
@@ -376,6 +401,7 @@ fn settings_from_config(
         unified_delay: bool_value(clash, "unified-delay", true),
         log_level: string_value(clash, "log-level").unwrap_or_else(|| "info".into()),
         core_log_enabled: core_log_enabled(app_settings),
+        rule_provider_download_proxy: app_settings.rule_provider_download_proxy.unwrap_or_default(),
         tun_enabled: app_settings.enable_tun_mode.unwrap_or(false),
         tun_diagnostics: platform::tun_diagnostics(
             app_settings.enable_tun_mode.unwrap_or(false),
@@ -399,7 +425,7 @@ fn settings_from_config(
     }
 }
 
-pub fn core_log_enabled(app_settings: &IAppSettings) -> bool {
+pub fn core_log_enabled(app_settings: &AppSettings) -> bool {
     app_settings.enable_core_log.unwrap_or(false)
 }
 
@@ -409,17 +435,17 @@ const fn core_log_state_label(enabled: bool) -> &'static str {
 
 async fn apply_external_controller_patch(
     state: &AppState,
-    patch: IAppSettings,
+    patch: AppSettings,
 ) -> Result<ExternalControllerApplyStatus> {
     let previous = state.store.load_app_settings().await?;
     let app_settings = patch_app_settings(state, &patch).await?;
     let runtime = match state.runtime.generate().await {
         Ok(runtime) => runtime,
         Err(err) => {
-            let rollback = IAppSettings {
+            let rollback = AppSettings {
                 enable_external_controller: Some(previous.enable_external_controller.unwrap_or(false)),
                 external_controller_port: Some(configured_external_controller_port(&previous)),
-                ..IAppSettings::default()
+                ..AppSettings::default()
             };
             let _ = patch_app_settings(state, &rollback).await;
             return Err(err);
@@ -480,7 +506,7 @@ async fn apply_external_controller_patch(
     Ok(status)
 }
 
-async fn wait_for_external_controller_runtime(state: &AppState, app_settings: &IAppSettings) -> bool {
+async fn wait_for_external_controller_runtime(state: &AppState, app_settings: &AppSettings) -> bool {
     for _ in 0..EXTERNAL_CONTROLLER_APPLY_RETRIES {
         if let Some(Ok(runtime)) = fetch_running_external_controller(state).await
             && external_controller_runtime_matches_target(app_settings, &runtime)
@@ -495,7 +521,7 @@ async fn wait_for_external_controller_runtime(state: &AppState, app_settings: &I
     false
 }
 
-async fn external_controller_port_matches_target(app_settings: &IAppSettings) -> bool {
+async fn external_controller_port_matches_target(app_settings: &AppSettings) -> bool {
     let port_open = local_external_controller_port_open(configured_external_controller_port(app_settings)).await;
     if app_settings.enable_external_controller.unwrap_or(false) {
         port_open
@@ -513,10 +539,7 @@ async fn local_external_controller_port_open(port: u16) -> bool {
     .is_ok_and(|result| result.is_ok())
 }
 
-fn external_controller_runtime_matches_target(
-    app_settings: &IAppSettings,
-    runtime: &RuntimeExternalController,
-) -> bool {
+fn external_controller_runtime_matches_target(app_settings: &AppSettings, runtime: &RuntimeExternalController) -> bool {
     if app_settings.enable_external_controller.unwrap_or(false) {
         return runtime.enabled
             && runtime.safe_local_bind
@@ -526,7 +549,7 @@ fn external_controller_runtime_matches_target(
 }
 
 fn preserve_external_controller_enabled(
-    app_settings: &IAppSettings,
+    app_settings: &AppSettings,
     runtime: Option<&RuntimeExternalController>,
 ) -> Option<bool> {
     let configured_enabled = app_settings.enable_external_controller.unwrap_or(false);
@@ -536,7 +559,7 @@ fn preserve_external_controller_enabled(
     (configured_enabled || runtime_enabled).then_some(true)
 }
 
-fn configured_runtime_external_controller(app_settings: &IAppSettings) -> RuntimeExternalController {
+fn configured_runtime_external_controller(app_settings: &AppSettings) -> RuntimeExternalController {
     let port = configured_external_controller_port(app_settings);
     RuntimeExternalController {
         enabled: true,
@@ -547,7 +570,7 @@ fn configured_runtime_external_controller(app_settings: &IAppSettings) -> Runtim
     }
 }
 
-async fn settings_from_saved_app_settings(state: &AppState, app_settings: &IAppSettings) -> Result<SettingsSummary> {
+async fn settings_from_saved_app_settings(state: &AppState, app_settings: &AppSettings) -> Result<SettingsSummary> {
     let clash = state.store.load_clash().await?;
     let paths = paths(state);
     Ok(settings_from_config(state, paths, &clash, app_settings, None, None))
@@ -568,10 +591,10 @@ async fn fetch_running_external_controller(state: &AppState) -> Option<Result<Ru
 }
 
 fn sync_external_controller_patch(
-    app_settings: &IAppSettings,
+    app_settings: &AppSettings,
     runtime: &RuntimeExternalController,
-) -> Option<IAppSettings> {
-    let mut patch = IAppSettings::default();
+) -> Option<AppSettings> {
+    let mut patch = AppSettings::default();
     let mut changed = false;
 
     if runtime.enabled {
@@ -593,7 +616,7 @@ fn sync_external_controller_patch(
 }
 
 fn external_controller_summary(
-    app_settings: &IAppSettings,
+    app_settings: &AppSettings,
     runtime: Option<&RuntimeExternalController>,
     runtime_error: Option<String>,
 ) -> ExternalControllerSummary {
@@ -681,7 +704,7 @@ fn parse_external_controller_bind(value: &str) -> Option<(String, u16)> {
         .map(|socket| (socket.ip().to_string(), socket.port()))
 }
 
-fn configured_external_controller_port(app_settings: &IAppSettings) -> u16 {
+fn configured_external_controller_port(app_settings: &AppSettings) -> u16 {
     app_settings
         .external_controller_port
         .filter(|port| *port > 0)
@@ -700,16 +723,16 @@ fn short_controller_error(message: &str) -> String {
     }
 }
 
-fn mode_from_clash(clash: &IClashTemp) -> Result<Mode> {
+fn mode_from_clash(clash: &BaseConfig) -> Result<Mode> {
     let mode = string_value(clash, "mode").unwrap_or_else(|| "rule".into());
     mode.parse()
 }
 
-fn bool_value(clash: &IClashTemp, key: &str, default: bool) -> bool {
+fn bool_value(clash: &BaseConfig, key: &str, default: bool) -> bool {
     clash.0.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 
-fn string_value(clash: &IClashTemp, key: &str) -> Option<String> {
+fn string_value(clash: &BaseConfig, key: &str) -> Option<String> {
     clash.0.get(key).and_then(Value::as_str).map(ToOwned::to_owned)
 }
 
@@ -723,7 +746,7 @@ mod tests {
         preserve_external_controller_enabled, runtime_external_controller, short_controller_error,
         sync_external_controller_patch,
     };
-    use clash_core::{IAppSettings, constants::network};
+    use clash_core::{AppSettings, constants::network};
 
     #[test]
     fn runtime_external_controller_parses_local_and_remote_binds() {
@@ -746,14 +769,14 @@ mod tests {
 
     #[test]
     fn core_log_defaults_to_disabled_for_legacy_config() {
-        assert!(!core_log_enabled(&IAppSettings::default()));
-        assert!(core_log_enabled(&IAppSettings {
+        assert!(!core_log_enabled(&AppSettings::default()));
+        assert!(core_log_enabled(&AppSettings {
             enable_core_log: Some(true),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         }));
-        assert!(!core_log_enabled(&IAppSettings {
+        assert!(!core_log_enabled(&AppSettings {
             enable_core_log: Some(false),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         }));
     }
 
@@ -779,7 +802,7 @@ mod tests {
 
     #[test]
     fn sync_external_controller_patch_follows_safe_runtime_only() {
-        let app_settings = IAppSettings::default();
+        let app_settings = AppSettings::default();
         let local = runtime_external_controller(Some("127.0.0.1:19097"));
         let patch = sync_external_controller_patch(&app_settings, &local).expect("local runtime patch");
         assert_eq!(patch.enable_external_controller, Some(true));
@@ -791,10 +814,10 @@ mod tests {
 
     #[test]
     fn sync_external_controller_patch_covers_missing_matching_and_default_port_cases() {
-        let saved_enabled = IAppSettings {
+        let saved_enabled = AppSettings {
             enable_external_controller: Some(true),
             external_controller_port: Some(19097),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         };
         let disabled_runtime = runtime_external_controller(None);
         assert!(sync_external_controller_patch(&saved_enabled, &disabled_runtime).is_none());
@@ -802,9 +825,9 @@ mod tests {
         let matching_runtime = runtime_external_controller(Some("127.0.0.1:19097"));
         assert!(sync_external_controller_patch(&saved_enabled, &matching_runtime).is_none());
 
-        let default_port_config = IAppSettings {
+        let default_port_config = AppSettings {
             enable_external_controller: Some(true),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         };
         let default_runtime = runtime_external_controller(Some("127.0.0.1:9097"));
         assert!(sync_external_controller_patch(&default_port_config, &default_runtime).is_none());
@@ -813,20 +836,20 @@ mod tests {
     #[test]
     fn configured_external_controller_port_uses_default_for_missing_or_zero() {
         assert_eq!(
-            configured_external_controller_port(&IAppSettings::default()),
+            configured_external_controller_port(&AppSettings::default()),
             network::DEFAULT_EXTERNAL_CONTROLLER_PORT
         );
         assert_eq!(
-            configured_external_controller_port(&IAppSettings {
+            configured_external_controller_port(&AppSettings {
                 external_controller_port: Some(0),
-                ..IAppSettings::default()
+                ..AppSettings::default()
             }),
             network::DEFAULT_EXTERNAL_CONTROLLER_PORT
         );
         assert_eq!(
-            configured_external_controller_port(&IAppSettings {
+            configured_external_controller_port(&AppSettings {
                 external_controller_port: Some(19097),
-                ..IAppSettings::default()
+                ..AppSettings::default()
             }),
             19097
         );
@@ -834,15 +857,15 @@ mod tests {
 
     #[test]
     fn preserve_external_controller_enabled_uses_saved_config_before_runtime() {
-        let saved_enabled = IAppSettings {
+        let saved_enabled = AppSettings {
             enable_external_controller: Some(true),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         };
         assert_eq!(preserve_external_controller_enabled(&saved_enabled, None), Some(true));
 
         let safe_runtime = runtime_external_controller(Some("127.0.0.1:19097"));
         assert_eq!(
-            preserve_external_controller_enabled(&IAppSettings::default(), Some(&safe_runtime)),
+            preserve_external_controller_enabled(&AppSettings::default(), Some(&safe_runtime)),
             Some(true)
         );
 
@@ -852,23 +875,23 @@ mod tests {
             Some(true)
         );
         assert_eq!(
-            preserve_external_controller_enabled(&IAppSettings::default(), Some(&unsafe_runtime)),
+            preserve_external_controller_enabled(&AppSettings::default(), Some(&unsafe_runtime)),
             None
         );
 
         let disabled_runtime = runtime_external_controller(None);
         assert_eq!(
-            preserve_external_controller_enabled(&IAppSettings::default(), Some(&disabled_runtime)),
+            preserve_external_controller_enabled(&AppSettings::default(), Some(&disabled_runtime)),
             None
         );
     }
 
     #[test]
     fn external_controller_runtime_matches_target_requires_safe_bind_and_exact_port() {
-        let enabled_target = IAppSettings {
+        let enabled_target = AppSettings {
             enable_external_controller: Some(true),
             external_controller_port: Some(19097),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         };
         let matching = runtime_external_controller(Some("127.0.0.1:19097"));
         assert!(external_controller_runtime_matches_target(&enabled_target, &matching));
@@ -885,10 +908,10 @@ mod tests {
             &unsafe_bind
         ));
 
-        let disabled_target = IAppSettings {
+        let disabled_target = AppSettings {
             enable_external_controller: Some(false),
             external_controller_port: Some(19097),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         };
         let disabled_runtime = runtime_external_controller(None);
         assert!(external_controller_runtime_matches_target(
@@ -900,10 +923,10 @@ mod tests {
 
     #[test]
     fn configured_runtime_external_controller_uses_safe_local_bind() {
-        let configured = IAppSettings {
+        let configured = AppSettings {
             enable_external_controller: Some(true),
             external_controller_port: Some(19097),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         };
         let runtime = configured_runtime_external_controller(&configured);
 
@@ -916,10 +939,10 @@ mod tests {
 
     #[test]
     fn external_controller_summary_distinguishes_config_runtime_warning_and_error_sources() {
-        let configured = IAppSettings {
+        let configured = AppSettings {
             enable_external_controller: Some(true),
             external_controller_port: Some(19097),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         };
         let config_summary = external_controller_summary(&configured, None, Some("未连接".into()));
         assert!(config_summary.configured_enabled);

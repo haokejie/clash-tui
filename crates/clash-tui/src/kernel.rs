@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow};
 use clash_core::{
-    AppPaths, IAppSettings, KernelOwner, KernelSnapshot, KernelState, OperationStatus, RuntimeConfigGenerator,
+    AppPaths, AppSettings, KernelOwner, KernelSnapshot, KernelState, OperationStatus, RuntimeConfigGenerator,
 };
 use clash_mihomo::{MihomoClient as _, MihomoClientConfig, SimpleMihomoClient};
 use serde::{Deserialize, Serialize};
@@ -512,7 +512,7 @@ impl KernelManager {
 
     async fn core_log_enabled(&self) -> bool {
         let settings_path = self.config.home_dir.join("settings.yaml");
-        IAppSettings::load_or_default(settings_path)
+        AppSettings::load_or_default(settings_path)
             .await
             .enable_core_log
             .unwrap_or(false)
@@ -1164,7 +1164,7 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    use clash_core::{AppPaths, ConfigStore, IAppSettings, KernelOwner, KernelState, RuntimeConfigGenerator};
+    use clash_core::{AppPaths, AppSettings, ConfigStore, KernelOwner, KernelState, RuntimeConfigGenerator};
     use clash_mihomo::ControllerEndpoint;
 
     use super::{
@@ -1561,9 +1561,9 @@ mod tests {
         let store = ConfigStore::new(paths.clone());
         let loaded = store.initialize().await.expect("initialize config");
         store
-            .patch_app_settings(&IAppSettings {
+            .patch_app_settings(&AppSettings {
                 enable_core_log: Some(false),
-                ..IAppSettings::default()
+                ..AppSettings::default()
             })
             .await
             .expect("disable core log");

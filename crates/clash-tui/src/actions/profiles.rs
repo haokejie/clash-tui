@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use clash_core::{
-    IProfiles, LocalProfileImport, PrfItem, PrfOption, RemoteProfileImport,
+    LocalProfileImport, ProfileCatalog, ProfileEntry, RemoteProfileImport, RemoteProfileOptions,
     config::profiles::{RemoteProfileDownload, download_remote_profile, generate_remote_uid},
 };
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ use crate::{
 pub struct ProfileSwitchResult {
     pub requested: String,
     pub previous: Option<String>,
-    pub profiles: IProfiles,
+    pub profiles: ProfileCatalog,
     pub runtime_path: String,
     pub runtime_validated: bool,
     pub runtime_reloaded: bool,
@@ -31,7 +31,7 @@ pub struct ProfileSwitchResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteImportResult {
-    pub profiles: IProfiles,
+    pub profiles: ProfileCatalog,
     pub attempt: RemoteImportAttempt,
 }
 
@@ -47,7 +47,7 @@ pub struct RemoteImportActivatedResult {
 #[serde(rename_all = "camelCase")]
 pub struct ProfileDeleteResult {
     pub previous: Option<String>,
-    pub profiles: IProfiles,
+    pub profiles: ProfileCatalog,
     pub current_changed: bool,
     pub runtime_path: Option<String>,
     pub runtime_validated: bool,
@@ -79,7 +79,7 @@ struct ProfileSwitchMutation {
 #[derive(Debug, Clone)]
 struct RemoteImportActivationMutation {
     previous: Option<String>,
-    import_profiles: IProfiles,
+    import_profiles: ProfileCatalog,
 }
 
 #[derive(Debug, Clone)]
@@ -87,13 +87,13 @@ struct ProfileDeleteMutation {
     previous: Option<String>,
 }
 
-pub async fn list(state: &AppState) -> Result<IProfiles> {
+pub async fn list(state: &AppState) -> Result<ProfileCatalog> {
     let profiles = state.store.load_profiles().await?;
     state.config.write().await.profiles = profiles.clone();
     Ok(profiles)
 }
 
-pub async fn current(state: &AppState) -> Result<Option<PrfItem>> {
+pub async fn current(state: &AppState) -> Result<Option<ProfileEntry>> {
     let profiles = list(state).await?;
     let Some(current) = profiles.current.as_deref() else {
         return Ok(None);
@@ -101,7 +101,7 @@ pub async fn current(state: &AppState) -> Result<Option<PrfItem>> {
     Ok(profiles.get_item(current).ok().cloned())
 }
 
-pub async fn import_local(state: &AppState, input: &LocalProfileImport) -> Result<IProfiles> {
+pub async fn import_local(state: &AppState, input: &LocalProfileImport) -> Result<ProfileCatalog> {
     let profiles = state.store.import_local_profile(input).await?;
     state.config.write().await.profiles = profiles.clone();
     Ok(profiles)
@@ -141,8 +141,17 @@ async fn download_remote_with_retry(input: &RemoteProfileImport) -> Result<Prepa
     for (strategy, label, with_proxy, self_proxy) in attempts {
         let mut attempt_input = base_input.clone();
         attempt_input.option = Some(import_proxy_option(input.option.as_ref(), with_proxy, self_proxy));
+        emit_remote_import_debug(
+            "attempt-start",
+            &format!(
+                "strategy={strategy}, label={label}, withProxy={}, selfProxy={}",
+                with_proxy.unwrap_or(false),
+                self_proxy.unwrap_or(false)
+            ),
+        );
         match download_remote_profile(&attempt_input).await {
             Ok(remote) => {
+                emit_remote_import_debug("attempt-ok", &format!("strategy={strategy}, label={label}"));
                 return Ok(PreparedRemoteImport {
                     input: attempt_input,
                     remote,
@@ -154,11 +163,26 @@ async fn download_remote_with_retry(input: &RemoteProfileImport) -> Result<Prepa
                     },
                 });
             }
-            Err(err) => errors.push(format!("{label}: {}", redact_urls(&err.to_string()))),
+            Err(err) => {
+                let message = redact_urls(&err.to_string());
+                emit_remote_import_debug(
+                    "attempt-error",
+                    &format!("strategy={strategy}, label={label}, error={message}"),
+                );
+                errors.push(format!("{label}: {message}"));
+            }
         }
     }
 
     bail!("远程订阅导入全部策略失败：{}", errors.join("；"))
+}
+
+fn emit_remote_import_debug(event: &str, message: &str) {
+    if std::env::var_os("CLASH_TUI_SUBSCRIPTION_DEBUG").is_some()
+        || std::env::var_os("CLASH_TUI_REMOTE_PROFILE_DEBUG").is_some()
+    {
+        eprintln!("remote import debug: event={event}, {message}");
+    }
 }
 
 pub async fn import_remote_with_retry_and_activate(
@@ -237,7 +261,11 @@ fn remote_import_input_with_uid(input: &RemoteProfileImport) -> RemoteProfileImp
     input
 }
 
-fn import_proxy_option(base: Option<&PrfOption>, with_proxy: Option<bool>, self_proxy: Option<bool>) -> PrfOption {
+fn import_proxy_option(
+    base: Option<&RemoteProfileOptions>,
+    with_proxy: Option<bool>,
+    self_proxy: Option<bool>,
+) -> RemoteProfileOptions {
     let mut option = base.cloned().unwrap_or_default();
     option.with_proxy = with_proxy;
     option.self_proxy = self_proxy;
@@ -301,7 +329,7 @@ pub async fn activate(state: Arc<AppState>, uid: String, start_core: bool) -> Re
 }
 
 #[must_use]
-pub fn imported_profile_uid(profiles: &IProfiles, requested_uid: Option<&str>) -> Option<String> {
+pub fn imported_profile_uid(profiles: &ProfileCatalog, requested_uid: Option<&str>) -> Option<String> {
     let items = profiles.items.as_deref().unwrap_or_default();
     requested_uid
         .and_then(|uid| items.iter().find(|item| item.uid.as_deref() == Some(uid)))
@@ -392,7 +420,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use clash_core::{IProfiles, LocalProfileImport, PrfItem, PrfOption, RemoteProfileImport};
+    use clash_core::{LocalProfileImport, ProfileCatalog, ProfileEntry, RemoteProfileImport, RemoteProfileOptions};
     use tokio::{
         io::{AsyncReadExt as _, AsyncWriteExt as _},
         net::TcpListener,
@@ -406,16 +434,14 @@ mod tests {
 
     #[test]
     fn import_proxy_option_sets_retry_strategy_without_losing_base_options() {
-        let base = PrfOption {
-            user_agent: Some("test-agent".into()),
+        let base = RemoteProfileOptions {
             update_interval: Some(120),
             timeout_seconds: Some(45),
-            ..PrfOption::default()
+            ..RemoteProfileOptions::default()
         };
 
         let option = super::import_proxy_option(Some(&base), Some(false), Some(true));
 
-        assert_eq!(option.user_agent.as_deref(), Some("test-agent"));
         assert_eq!(option.update_interval, Some(120));
         assert_eq!(option.timeout_seconds, Some(45));
         assert_eq!(option.with_proxy, Some(false));
@@ -701,18 +727,18 @@ mod tests {
 
     #[test]
     fn imported_profile_uid_prefers_requested_or_last_remote() {
-        let profiles = IProfiles {
+        let profiles = ProfileCatalog {
             current: Some("Rold".into()),
             items: Some(vec![
-                PrfItem {
+                ProfileEntry {
                     uid: Some("Rold".into()),
                     itype: Some("remote".into()),
-                    ..PrfItem::default()
+                    ..ProfileEntry::default()
                 },
-                PrfItem {
+                ProfileEntry {
                     uid: Some("Rnew".into()),
                     itype: Some("remote".into()),
-                    ..PrfItem::default()
+                    ..ProfileEntry::default()
                 },
             ]),
         };

@@ -5,7 +5,10 @@ use clap::{
     Arg, ArgAction, Args, Command as ClapCommand, CommandFactory as _, FromArgMatches as _, Parser, Subcommand,
     ValueEnum,
 };
-use clash_core::{IProfiles, LocalProfileImport, PrfItem, RemoteProfileImport, config::profiles::generate_remote_uid};
+use clash_core::{
+    LocalProfileImport, ProfileCatalog, ProfileEntry, RemoteProfileImport, RuleProviderDownloadProxy,
+    config::profiles::generate_remote_uid,
+};
 use serde::Serialize;
 use serde_json::json;
 
@@ -273,6 +276,8 @@ pub enum SettingsKeyArg {
     LogLevel,
     #[value(name = "core-log")]
     CoreLog,
+    #[value(name = "rule-provider-download-proxy")]
+    RuleProviderDownloadProxy,
     #[value(name = "mixed-port")]
     MixedPort,
     #[value(name = "external-controller")]
@@ -336,11 +341,20 @@ pub enum ConnectionsCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ProviderCommand {
-    #[command(about = "更新 Provider")]
+    #[command(about = "更新 Proxy Provider")]
     Update {
         #[arg(help = "Provider 名称")]
         provider: String,
     },
+    #[command(name = "update-rule")]
+    #[command(about = "更新 Rule Provider")]
+    UpdateRule {
+        #[arg(help = "Rule Provider 名称")]
+        provider: String,
+    },
+    #[command(name = "update-rules")]
+    #[command(about = "更新全部 Rule Provider")]
+    UpdateRules,
     #[command(about = "对 Provider 执行健康检查")]
     Healthcheck {
         #[arg(help = "Provider 名称")]
@@ -660,7 +674,7 @@ struct RemoteImportProfileSummary {
 
 impl RemoteImportOutput {
     fn from_profiles(
-        profiles: &IProfiles,
+        profiles: &ProfileCatalog,
         requested_uid: Option<&str>,
         attempt: Option<actions::profiles::RemoteImportAttempt>,
     ) -> Self {
@@ -697,14 +711,14 @@ impl RemoteImportOutput {
     }
 }
 
-fn imported_profile<'a>(items: &'a [PrfItem], requested_uid: Option<&str>) -> Option<&'a PrfItem> {
+fn imported_profile<'a>(items: &'a [ProfileEntry], requested_uid: Option<&str>) -> Option<&'a ProfileEntry> {
     requested_uid
         .and_then(|uid| items.iter().find(|item| item.uid.as_deref() == Some(uid)))
         .or_else(|| items.iter().rev().find(|item| item.itype.as_deref() == Some("remote")))
 }
 
-impl From<&PrfItem> for RemoteImportProfileSummary {
-    fn from(item: &PrfItem) -> Self {
+impl From<&ProfileEntry> for RemoteImportProfileSummary {
+    fn from(item: &ProfileEntry) -> Self {
         Self {
             uid: item.uid.clone(),
             name: item.name.clone(),
@@ -766,6 +780,11 @@ async fn execute_settings(command: SettingsCommand, state: Arc<AppState>) -> Res
             SettingsKeyArg::CoreLog => Ok(CliOutput::data(
                 "settings updated",
                 actions::config::set_core_log_enabled(&state, parse_bool(&value)?).await?,
+            )),
+            SettingsKeyArg::RuleProviderDownloadProxy => Ok(CliOutput::data(
+                "settings updated",
+                actions::config::set_rule_provider_download_proxy(&state, RuleProviderDownloadProxy::parse(&value)?)
+                    .await?,
             )),
             SettingsKeyArg::MixedPort => {
                 let port = value.parse::<u16>()?;
@@ -875,11 +894,48 @@ async fn execute_provider(command: ProviderCommand, state: &AppState) -> Result<
             "provider update",
             actions::controller::update_provider(state, &provider).await?,
         )),
+        ProviderCommand::UpdateRule { provider } => Ok(CliOutput::data(
+            "rule provider update",
+            actions::controller::update_rule_provider(state, &provider).await?,
+        )),
+        ProviderCommand::UpdateRules => {
+            let sweep = ensure_rule_provider_update_sweep_success(
+                actions::controller::update_all_rule_providers(state).await?,
+            )?;
+            Ok(CliOutput::data("rule providers update", sweep))
+        }
         ProviderCommand::Healthcheck { provider } => Ok(CliOutput::data(
             "provider healthcheck",
             actions::controller::healthcheck_provider(state, &provider).await?,
         )),
     }
+}
+
+fn ensure_rule_provider_update_sweep_success(
+    sweep: actions::controller::RuleProviderUpdateSweep,
+) -> Result<actions::controller::RuleProviderUpdateSweep> {
+    if sweep.failed == 0 {
+        return Ok(sweep);
+    }
+
+    let examples = sweep
+        .errors
+        .iter()
+        .take(3)
+        .map(|error| format!("{}: {}", error.provider, error.error))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let examples = if examples.is_empty() {
+        String::new()
+    } else {
+        format!("; examples: {examples}")
+    };
+    anyhow::bail!(
+        "rule providers update failed: updated {}, failed {}{}",
+        sweep.updated,
+        sweep.failed,
+        examples
+    );
 }
 
 async fn execute_subscription(command: SubscriptionCommand, state: Arc<AppState>) -> Result<CliOutput> {
@@ -1143,7 +1199,9 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{Cli, CliOutput, Command, ProfileCommand, redact_urls};
+    use crate::actions::controller::{RuleProviderUpdateError, RuleProviderUpdateSweep};
+
+    use super::{Cli, CliOutput, Command, ProfileCommand, ensure_rule_provider_update_sweep_success, redact_urls};
 
     #[test]
     fn parses_core_status() {
@@ -1239,11 +1297,14 @@ mod tests {
     fn parses_settings_set() {
         let cli = Cli::parse_from(["clash-tui", "settings", "set", "mixed-port", "7897"]);
         let core_log = Cli::parse_from(["clash-tui", "settings", "set", "core-log", "false"]);
+        let rule_provider_proxy =
+            Cli::parse_from(["clash-tui", "settings", "set", "rule-provider-download-proxy", "direct"]);
         let external = Cli::parse_from(["clash-tui", "settings", "set", "external-controller", "true"]);
         let external_port = Cli::parse_from(["clash-tui", "settings", "set", "external-controller-port", "9097"]);
 
         assert!(matches!(cli.command, Some(Command::Settings { .. })));
         assert!(matches!(core_log.command, Some(Command::Settings { .. })));
+        assert!(matches!(rule_provider_proxy.command, Some(Command::Settings { .. })));
         assert!(matches!(external.command, Some(Command::Settings { .. })));
         assert!(matches!(external_port.command, Some(Command::Settings { .. })));
     }
@@ -1253,10 +1314,34 @@ mod tests {
         let rules = Cli::parse_from(["clash-tui", "rules", "search", "example", "--limit", "10"]);
         let connections = Cli::parse_from(["clash-tui", "connections", "close-all"]);
         let provider = Cli::parse_from(["clash-tui", "provider", "healthcheck", "Proxy Provider"]);
+        let rule_provider = Cli::parse_from(["clash-tui", "provider", "update-rule", "Rule Provider"]);
+        let rule_provider_all = Cli::parse_from(["clash-tui", "provider", "update-rules"]);
 
         assert!(matches!(rules.command, Some(Command::Rules { .. })));
         assert!(matches!(connections.command, Some(Command::Connections { .. })));
         assert!(matches!(provider.command, Some(Command::Provider { .. })));
+        assert!(matches!(rule_provider.command, Some(Command::Provider { .. })));
+        assert!(matches!(rule_provider_all.command, Some(Command::Provider { .. })));
+    }
+
+    #[test]
+    fn failed_rule_provider_sweep_becomes_cli_error() {
+        let sweep = RuleProviderUpdateSweep {
+            total: 2,
+            updated: 1,
+            failed: 1,
+            results: Vec::new(),
+            errors: vec![RuleProviderUpdateError {
+                provider: "Direct".into(),
+                error: "Get https://example.test/rules?token=secret".into(),
+            }],
+        };
+
+        let err = ensure_rule_provider_update_sweep_success(sweep).expect_err("failed sweep should be an error");
+        let message = err.to_string();
+
+        assert!(message.contains("updated 1, failed 1"));
+        assert!(message.contains("Direct"));
     }
 
     #[test]

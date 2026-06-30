@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use clash_core::{IProfiles, PrfItem, config::PrfSelected};
+use clash_core::{ProfileCatalog, ProfileEntry, config::ProxySelection};
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::{Mapping, Value};
 use tokio::time::{Instant, sleep};
@@ -36,7 +36,7 @@ pub struct ProxySelectionSaveResult {
     pub profile_uid: String,
     pub group: String,
     pub proxy: String,
-    pub profiles: IProfiles,
+    pub profiles: ProfileCatalog,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +48,7 @@ pub struct ProxySelectionResult {
     pub group: String,
     pub proxy: String,
     pub message: String,
-    pub profiles: IProfiles,
+    pub profiles: ProfileCatalog,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,6 +70,23 @@ pub struct ProxySelectionApplyEntry {
     pub proxy: String,
     pub status: String,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleProviderUpdateSweep {
+    pub total: usize,
+    pub updated: usize,
+    pub failed: usize,
+    pub results: Vec<ProviderOperationResult>,
+    pub errors: Vec<RuleProviderUpdateError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleProviderUpdateError {
+    pub provider: String,
+    pub error: String,
 }
 
 pub async fn proxy_groups(state: &AppState) -> Result<ProxyGroups> {
@@ -176,9 +193,9 @@ pub async fn save_proxy_selection_if_current(
         .store
         .patch_profile(
             &current_uid,
-            &PrfItem {
+            &ProfileEntry {
                 selected: Some(selected),
-                ..PrfItem::default()
+                ..ProfileEntry::default()
             },
         )
         .await?;
@@ -456,6 +473,31 @@ pub async fn update_rule_provider(state: &AppState, provider: &str) -> Result<Pr
         .await
 }
 
+pub async fn update_all_rule_providers(state: &AppState) -> Result<RuleProviderUpdateSweep> {
+    let providers = rule_providers(state).await?;
+    let total = providers.providers.len();
+    let mut results = Vec::with_capacity(total);
+    let mut errors = Vec::new();
+
+    for provider in providers.providers.keys() {
+        match update_rule_provider(state, provider).await {
+            Ok(result) => results.push(result),
+            Err(err) => errors.push(RuleProviderUpdateError {
+                provider: provider.clone(),
+                error: err.to_string(),
+            }),
+        }
+    }
+
+    Ok(RuleProviderUpdateSweep {
+        total,
+        updated: results.len(),
+        failed: errors.len(),
+        results,
+        errors,
+    })
+}
+
 pub async fn healthcheck_provider(state: &AppState, provider: &str) -> Result<ProviderOperationResult> {
     MihomoController::new(state.mihomo.clone())
         .healthcheck_provider(provider)
@@ -502,11 +544,11 @@ async fn saved_proxy_selections(state: &AppState) -> Result<Vec<(String, String)
         .collect())
 }
 
-fn upsert_proxy_selection(selected: &mut Vec<PrfSelected>, group: &str, proxy: &str) {
+fn upsert_proxy_selection(selected: &mut Vec<ProxySelection>, group: &str, proxy: &str) {
     if let Some(index) = selected.iter().position(|entry| entry.name.as_deref() == Some(group)) {
         selected.remove(index);
     }
-    selected.push(PrfSelected {
+    selected.push(ProxySelection {
         name: Some(group.to_owned()),
         now: Some(proxy.to_owned()),
     });
@@ -773,11 +815,11 @@ proxies:
     #[test]
     fn upsert_proxy_selection_replaces_existing_group_without_losing_others() {
         let mut selected = vec![
-            PrfSelected {
+            ProxySelection {
                 name: Some("Proxy".into()),
                 now: Some("HK-1".into()),
             },
-            PrfSelected {
+            ProxySelection {
                 name: Some("Auto".into()),
                 now: Some("SG-1".into()),
             },

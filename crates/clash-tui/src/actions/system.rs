@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clash_core::{IAppSettings, KernelState};
+use clash_core::{AppSettings, KernelState};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -40,17 +40,17 @@ pub async fn tun_diagnostics(state: &AppState) -> Result<platform::TunDiagnostic
 
 pub async fn set_tun(state: &AppState, enabled: bool) -> Result<SwitchStatus> {
     let previous = state.store.load_app_settings().await?;
-    let patch = IAppSettings {
+    let patch = AppSettings {
         enable_tun_mode: Some(enabled),
-        ..IAppSettings::default()
+        ..AppSettings::default()
     };
     config::patch_app_settings(state, &patch).await?;
     let runtime = match state.runtime.generate().await {
         Ok(runtime) => runtime,
         Err(err) => {
-            let rollback = IAppSettings {
+            let rollback = AppSettings {
                 enable_tun_mode: Some(previous.enable_tun_mode.unwrap_or(false)),
-                ..IAppSettings::default()
+                ..AppSettings::default()
             };
             let _ = config::patch_app_settings(state, &rollback).await;
             return Err(err);
@@ -139,17 +139,17 @@ pub async fn system_proxy_diagnostics(state: &AppState) -> Result<platform::Syst
 
 pub async fn set_system_proxy(state: &AppState, enabled: bool) -> Result<SwitchStatus> {
     let previous = state.store.load_app_settings().await?;
-    let patch = IAppSettings {
+    let patch = AppSettings {
         enable_system_proxy: Some(enabled),
-        ..IAppSettings::default()
+        ..AppSettings::default()
     };
     let app_settings = config::patch_app_settings(state, &patch).await?;
     let mut status = platform::apply_system_proxy(&app_settings, enabled);
     if status.platform_applied == Some(false) {
         let previous_enabled = previous.enable_system_proxy.unwrap_or(false);
-        let rollback = IAppSettings {
+        let rollback = AppSettings {
             enable_system_proxy: Some(previous_enabled),
-            ..IAppSettings::default()
+            ..AppSettings::default()
         };
         match config::patch_app_settings(state, &rollback).await {
             Ok(_) => {

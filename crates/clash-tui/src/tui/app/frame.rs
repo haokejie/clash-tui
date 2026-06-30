@@ -449,6 +449,7 @@ pub(crate) const fn settings_row_busy_message(row: SettingRow) -> Option<&'stati
         | SettingRow::TuiTheme
         | SettingRow::TuiDisplayMode
         | SettingRow::TuiPunctuationMode
+        | SettingRow::RuleProviderDownloadProxy
         | SettingRow::LogLevel => Some("正在应用设置..."),
         SettingRow::MixedPort
         | SettingRow::CoreLog

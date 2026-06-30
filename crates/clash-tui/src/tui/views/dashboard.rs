@@ -788,7 +788,7 @@ fn subscription_usage(app: &TuiApp) -> SubscriptionUsage {
     }
 }
 
-fn current_profile(app: &TuiApp) -> Option<&clash_core::PrfItem> {
+fn current_profile(app: &TuiApp) -> Option<&clash_core::ProfileEntry> {
     let current = app.profiles_current.as_deref()?;
     app.profiles
         .iter()
