@@ -14,9 +14,9 @@ use crate::{
 };
 
 #[derive(Default, Debug, Clone, PartialEq)]
-pub struct IClashTemp(pub Mapping);
+pub struct BaseConfig(pub Mapping);
 
-impl IClashTemp {
+impl BaseConfig {
     #[must_use]
     pub fn template() -> Self {
         Self::template_with_ipc::<&Path>(None)
@@ -25,35 +25,18 @@ impl IClashTemp {
     #[must_use]
     pub fn template_with_ipc<P: AsRef<Path>>(ipc_path: Option<P>) -> Self {
         let mut map = Mapping::new();
-        let mut tun_config = Mapping::new();
         let ipc_path = ipc_path
             .as_ref()
             .and_then(|path| path.as_ref().to_str())
             .filter(|path| !path.is_empty());
 
-        tun_config.insert("enable".into(), false.into());
-        tun_config.insert("stack".into(), tun::DEFAULT_STACK.into());
-        tun_config.insert("auto-route".into(), true.into());
-        tun_config.insert("strict-route".into(), false.into());
-        tun_config.insert("auto-detect-interface".into(), true.into());
-        tun_config.insert(
-            "dns-hijack".into(),
-            Value::Sequence(tun::DNS_HIJACK.iter().map(|value| Value::from(*value)).collect()),
-        );
-
+        map.insert("tun".into(), Value::Mapping(tun_defaults()));
+        insert_proxy_ports(&mut map);
+        insert_core_defaults(&mut map);
         #[cfg(not(target_os = "windows"))]
         map.insert("redir-port".into(), network::ports::DEFAULT_REDIR.into());
         #[cfg(target_os = "linux")]
         map.insert("tproxy-port".into(), network::ports::DEFAULT_TPROXY.into());
-
-        map.insert("tun".into(), Value::Mapping(tun_config));
-        map.insert("mixed-port".into(), network::ports::DEFAULT_MIXED.into());
-        map.insert("socks-port".into(), network::ports::DEFAULT_SOCKS.into());
-        map.insert("port".into(), network::ports::DEFAULT_HTTP.into());
-        map.insert("log-level".into(), "info".into());
-        map.insert("allow-lan".into(), false.into());
-        map.insert("ipv6".into(), true.into());
-        map.insert("mode".into(), "rule".into());
         #[cfg(unix)]
         let uses_ipc_controller = ipc_path.is_some();
         #[cfg(not(unix))]
@@ -72,8 +55,7 @@ impl IClashTemp {
             #[cfg(windows)]
             map.insert("external-controller-pipe".into(), ipc_path.into());
         }
-        map.insert("secret".into(), "set-your-secret".into());
-        map.insert("unified-delay".into(), true.into());
+        insert_auth_defaults(&mut map);
 
         Self(map)
     }
@@ -139,14 +121,23 @@ impl IClashTemp {
     #[must_use]
     pub fn get_client_info(&self) -> ClashInfo {
         let config = &self.0;
+        let (mixed_port, socks_port, port) = Self::client_ports(config);
 
         ClashInfo {
-            mixed_port: Self::guard_mixed_port(config),
-            socks_port: Self::guard_socks_port(config),
-            port: Self::guard_port(config),
-            server: Self::guard_client_ctrl(config),
             secret: config.get("secret").and_then(scalar_to_string),
+            server: Self::guard_client_ctrl(config),
+            port,
+            socks_port,
+            mixed_port,
         }
+    }
+
+    fn client_ports(config: &Mapping) -> (u16, u16, u16) {
+        (
+            Self::guard_mixed_port(config),
+            Self::guard_socks_port(config),
+            Self::guard_port(config),
+        )
     }
 
     #[must_use]
@@ -196,6 +187,38 @@ impl IClashTemp {
     }
 }
 
+fn tun_defaults() -> Mapping {
+    let mut defaults = Mapping::new();
+    defaults.insert("enable".into(), false.into());
+    defaults.insert("stack".into(), tun::DEFAULT_STACK.into());
+    defaults.insert("auto-route".into(), true.into());
+    defaults.insert("strict-route".into(), false.into());
+    defaults.insert("auto-detect-interface".into(), true.into());
+    defaults.insert(
+        "dns-hijack".into(),
+        Value::Sequence(tun::DNS_HIJACK.iter().map(|value| Value::from(*value)).collect()),
+    );
+    defaults
+}
+
+fn insert_proxy_ports(config: &mut Mapping) {
+    config.insert("mixed-port".into(), network::ports::DEFAULT_MIXED.into());
+    config.insert("socks-port".into(), network::ports::DEFAULT_SOCKS.into());
+    config.insert("port".into(), network::ports::DEFAULT_HTTP.into());
+}
+
+fn insert_core_defaults(config: &mut Mapping) {
+    config.insert("mode".into(), "rule".into());
+    config.insert("ipv6".into(), true.into());
+    config.insert("allow-lan".into(), false.into());
+    config.insert("log-level".into(), "info".into());
+}
+
+fn insert_auth_defaults(config: &mut Mapping) {
+    config.insert("secret".into(), "set-your-secret".into());
+    config.insert("unified-delay".into(), true.into());
+}
+
 fn guard_u16(config: &Mapping, key: &str, default: u16) -> u16 {
     let port = config.get(key).and_then(value_to_u16).unwrap_or(default);
     if port == 0 { default } else { port }
@@ -221,33 +244,33 @@ fn scalar_to_string(value: &Value) -> Option<String> {
 #[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ClashInfo {
-    pub mixed_port: u16,
-    pub socks_port: u16,
-    pub port: u16,
-    pub server: String,
     pub secret: Option<String>,
+    pub server: String,
+    pub port: u16,
+    pub socks_port: u16,
+    pub mixed_port: u16,
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub struct IClash {
+pub struct ClashConfig {
+    pub interface_name: Option<String>,
+    pub external_controller: Option<String>,
     pub mixed_port: Option<u16>,
     pub socks_port: Option<u16>,
-    pub port: Option<u16>,
-    pub allow_lan: Option<bool>,
     pub log_level: Option<String>,
-    pub ipv6: Option<bool>,
-    pub mode: Option<String>,
-    pub external_controller: Option<String>,
+    pub allow_lan: Option<bool>,
     pub secret: Option<String>,
-    pub dns: Option<IClashDNS>,
-    pub tun: Option<IClashTUN>,
-    pub interface_name: Option<String>,
+    pub port: Option<u16>,
+    pub mode: Option<String>,
+    pub ipv6: Option<bool>,
+    pub tun: Option<ClashTunConfig>,
+    pub dns: Option<ClashDnsConfig>,
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub struct IClashTUN {
+pub struct ClashTunConfig {
     pub enable: Option<bool>,
     pub stack: Option<String>,
     pub auto_route: Option<bool>,
@@ -257,23 +280,23 @@ pub struct IClashTUN {
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub struct IClashDNS {
-    pub enable: Option<bool>,
-    pub listen: Option<String>,
+pub struct ClashDnsConfig {
+    pub nameserver_policy: Option<Vec<String>>,
+    pub fallback_filter: Option<ClashFallbackFilter>,
     pub default_nameserver: Option<Vec<String>>,
+    pub fake_ip_filter: Option<Vec<String>>,
     pub enhanced_mode: Option<String>,
     pub fake_ip_range: Option<String>,
-    pub use_hosts: Option<bool>,
-    pub fake_ip_filter: Option<Vec<String>>,
     pub nameserver: Option<Vec<String>>,
     pub fallback: Option<Vec<String>>,
-    pub fallback_filter: Option<IClashFallbackFilter>,
-    pub nameserver_policy: Option<Vec<String>>,
+    pub use_hosts: Option<bool>,
+    pub listen: Option<String>,
+    pub enable: Option<bool>,
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub struct IClashFallbackFilter {
+pub struct ClashFallbackFilter {
     pub geoip: Option<bool>,
     pub geoip_code: Option<String>,
     pub ipcidr: Option<Vec<String>>,
@@ -288,11 +311,11 @@ mod tests {
 
     use crate::constants::tun;
 
-    use super::{ClashInfo, IClashTemp};
+    use super::{BaseConfig, ClashInfo};
 
     #[test]
     fn default_template_has_stable_client_info() {
-        let info = IClashTemp::template().get_client_info();
+        let info = BaseConfig::template().get_client_info();
 
         assert_eq!(
             info,
@@ -308,7 +331,7 @@ mod tests {
 
     #[test]
     fn default_template_includes_tun_defaults() -> Result<(), &'static str> {
-        let template = IClashTemp::template();
+        let template = BaseConfig::template();
         let tun_config = template
             .0
             .get("tun")
@@ -330,7 +353,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn ipc_template_does_not_expose_tcp_external_controller() {
-        let template = IClashTemp::template_with_ipc(Some(Path::new("/tmp/app_settings.sock")));
+        let template = BaseConfig::template_with_ipc(Some(Path::new("/tmp/app_settings.sock")));
 
         assert!(template.0.get("external-controller").is_none());
         assert!(template.0.get("external-controller-cors").is_none());
@@ -347,7 +370,7 @@ mod tests {
         map.insert("external-controller".into(), Value::from("0.0.0.0:8080"));
         map.insert("external-controller-cors".into(), Value::Mapping(Mapping::new()));
 
-        let config = IClashTemp::from_mapping(map, Some(Path::new("/tmp/app_settings.sock")));
+        let config = BaseConfig::from_mapping(map, Some(Path::new("/tmp/app_settings.sock")));
 
         assert!(config.0.get("external-controller").is_none());
         assert!(config.0.get("external-controller-cors").is_none());
@@ -365,7 +388,7 @@ mod tests {
         map.insert("port".into(), Value::from("abc"));
         map.insert("external-controller".into(), Value::from("0.0.0.0:8080"));
 
-        let info = IClashTemp(IClashTemp::guard(map)).get_client_info();
+        let info = BaseConfig(BaseConfig::guard(map)).get_client_info();
 
         assert_eq!(info.mixed_port, 7897);
         assert_eq!(info.socks_port, 7898);

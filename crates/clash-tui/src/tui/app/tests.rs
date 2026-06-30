@@ -25,8 +25,8 @@ use crate::mihomo_controller::{
 use crate::subscriptions::{SubscriptionProfileStatus, SubscriptionSweep};
 use crate::{actions, options::ClashTuiOptions, state::AppState};
 use clash_core::{
-    IProfiles, KernelOwner, KernelSnapshot, KernelState, LocalProfileImport, PrfItem,
-    config::{PrfExtra, PrfSelected},
+    KernelOwner, KernelSnapshot, KernelState, LocalProfileImport, ProfileCatalog, ProfileEntry,
+    config::{ProxySelection, SubscriptionUsage},
 };
 
 fn test_job(id: &str, status: JobStatus) -> JobRecord {
@@ -398,18 +398,18 @@ async fn dashboard_renders_numbered_navigation_and_actionable_summary() {
             ),
             last_exit: None,
         }),
-        profiles: vec![PrfItem {
+        profiles: vec![ProfileEntry {
             uid: Some("remote-1".into()),
             itype: Some("remote".into()),
             name: Some("🚀正式订阅".into()),
-            extra: Some(PrfExtra {
+            extra: Some(SubscriptionUsage {
                 upload: 100 * 1024 * 1024,
                 download: 200 * 1024 * 1024,
                 total: 1000 * 1024 * 1024,
                 expire: 0,
             }),
             updated: Some(1),
-            ..PrfItem::default()
+            ..ProfileEntry::default()
         }],
         profiles_current: Some("remote-1".into()),
         proxy_groups: vec![ProxyGroupRow {
@@ -748,7 +748,7 @@ async fn settings_view_renders_network_apply_boundaries() {
     )
     .await
     .expect("state");
-    let backend = TestBackend::new(140, 32);
+    let backend = TestBackend::new(140, 34);
     let mut terminal = Terminal::new(backend).expect("terminal");
     let mut app = TuiApp {
         view: View::Settings,
@@ -870,17 +870,17 @@ fn profile_rows_align_wide_text_columns() {
         view: View::Profiles,
         profiles_current: Some("remote-cn".into()),
         profiles: vec![
-            PrfItem {
+            ProfileEntry {
                 uid: Some("remote-cn".into()),
                 itype: Some("remote".into()),
                 name: Some("🐮正式订阅-香港节点".into()),
-                ..PrfItem::default()
+                ..ProfileEntry::default()
             },
-            PrfItem {
+            ProfileEntry {
                 uid: Some("local-default".into()),
                 itype: Some("local".into()),
                 name: Some("default".into()),
-                ..PrfItem::default()
+                ..ProfileEntry::default()
             },
         ],
         ..TuiApp::default()
@@ -1123,21 +1123,21 @@ fn proxy_group_selection_restores_from_current_profile_selected() {
     ];
     let mut app = TuiApp::default();
 
-    app.apply_profiles(IProfiles {
+    app.apply_profiles(ProfileCatalog {
         current: Some("R001".into()),
-        items: Some(vec![PrfItem {
+        items: Some(vec![ProfileEntry {
             uid: Some("R001".into()),
             selected: Some(vec![
-                PrfSelected {
+                ProxySelection {
                     name: Some("GLOBAL".into()),
                     now: Some("HK".into()),
                 },
-                PrfSelected {
+                ProxySelection {
                     name: Some("日本节点".into()),
                     now: Some("JP".into()),
                 },
             ]),
-            ..PrfItem::default()
+            ..ProfileEntry::default()
         }]),
     });
     app.apply_proxy_groups(groups);
@@ -1173,15 +1173,15 @@ fn proxy_group_selection_restores_from_profile_when_groups_load_first() {
         Some("GLOBAL")
     );
 
-    app.apply_profiles(IProfiles {
+    app.apply_profiles(ProfileCatalog {
         current: Some("R001".into()),
-        items: Some(vec![PrfItem {
+        items: Some(vec![ProfileEntry {
             uid: Some("R001".into()),
-            selected: Some(vec![PrfSelected {
+            selected: Some(vec![ProxySelection {
                 name: Some("日本节点".into()),
                 now: Some("JP".into()),
             }]),
-            ..PrfItem::default()
+            ..ProfileEntry::default()
         }]),
     });
 
@@ -1303,15 +1303,15 @@ fn proxy_group_navigation_does_not_change_dashboard_group_context() {
 
 #[test]
 fn dashboard_proxy_group_popup_selection_survives_profile_refresh() {
-    let profiles = IProfiles {
+    let profiles = ProfileCatalog {
         current: Some("R001".into()),
-        items: Some(vec![PrfItem {
+        items: Some(vec![ProfileEntry {
             uid: Some("R001".into()),
-            selected: Some(vec![PrfSelected {
+            selected: Some(vec![ProxySelection {
                 name: Some("订阅策略".into()),
                 now: Some("香港三区".into()),
             }]),
-            ..PrfItem::default()
+            ..ProfileEntry::default()
         }]),
     };
     let groups = vec![
@@ -3436,12 +3436,12 @@ fn apply_profiles_clears_proxy_runtime_state_when_current_changes() {
         ..TuiApp::default()
     };
 
-    app.apply_profiles(IProfiles {
+    app.apply_profiles(ProfileCatalog {
         current: Some("Rnew".into()),
-        items: Some(vec![PrfItem {
+        items: Some(vec![ProfileEntry {
             uid: Some("Rnew".into()),
             itype: Some("remote".into()),
-            ..PrfItem::default()
+            ..ProfileEntry::default()
         }]),
     });
 
@@ -3477,12 +3477,12 @@ fn apply_profiles_keeps_proxy_runtime_state_when_current_is_unchanged() {
         ..TuiApp::default()
     };
 
-    app.apply_profiles(IProfiles {
+    app.apply_profiles(ProfileCatalog {
         current: Some("Rcurrent".into()),
-        items: Some(vec![PrfItem {
+        items: Some(vec![ProfileEntry {
             uid: Some("Rcurrent".into()),
             itype: Some("remote".into()),
-            ..PrfItem::default()
+            ..ProfileEntry::default()
         }]),
     });
 

@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -80,6 +80,7 @@ pub struct JobManager {
     sequence: Arc<AtomicU64>,
     events: broadcast::Sender<ClashTuiEvent>,
     history_path: Option<Arc<PathBuf>>,
+    history_writable: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -97,6 +98,7 @@ impl Default for JobManager {
             sequence: Arc::new(AtomicU64::new(1)),
             events,
             history_path: None,
+            history_writable: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -345,6 +347,10 @@ impl JobManager {
         let bytes = match tokio::fs::read(path.as_ref()).await {
             Ok(bytes) => bytes,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                self.disable_history_persistence();
+                return;
+            }
             Err(err) => {
                 eprintln!("failed to read job history {}: {err}", path.display());
                 return;
@@ -384,6 +390,9 @@ impl JobManager {
         let Some(path) = self.history_path.as_ref() else {
             return;
         };
+        if !self.history_writable.load(Ordering::Relaxed) {
+            return;
+        }
         let jobs = self.list().await;
         let Some(parent) = path.parent() else {
             eprintln!(
@@ -393,6 +402,10 @@ impl JobManager {
             return;
         };
         if let Err(err) = tokio::fs::create_dir_all(parent).await {
+            if err.kind() == std::io::ErrorKind::PermissionDenied {
+                self.disable_history_persistence();
+                return;
+            }
             eprintln!("failed to create job history directory {}: {err}", parent.display());
             return;
         }
@@ -405,13 +418,25 @@ impl JobManager {
         };
         let tmp_path = history_temp_path(path.as_ref());
         if let Err(err) = tokio::fs::write(&tmp_path, bytes).await {
+            if err.kind() == std::io::ErrorKind::PermissionDenied {
+                self.disable_history_persistence();
+                return;
+            }
             eprintln!("failed to write job history {}: {err}", tmp_path.display());
             return;
         }
         if let Err(err) = tokio::fs::rename(&tmp_path, path.as_ref()).await {
             let _ = tokio::fs::remove_file(&tmp_path).await;
+            if err.kind() == std::io::ErrorKind::PermissionDenied {
+                self.disable_history_persistence();
+                return;
+            }
             eprintln!("failed to replace job history {}: {err}", path.display());
         }
+    }
+
+    fn disable_history_persistence(&self) {
+        self.history_writable.store(false, Ordering::Relaxed);
     }
 }
 
@@ -607,6 +632,43 @@ mod tests {
         let _ = tokio::fs::remove_file(path).await;
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn job_manager_disables_unwritable_history_without_losing_jobs() {
+        use std::{os::unix::fs::PermissionsExt as _, sync::atomic::Ordering};
+
+        let dir = history_test_dir();
+        tokio::fs::create_dir_all(&dir).await.expect("create history dir");
+        let mut permissions = tokio::fs::metadata(&dir)
+            .await
+            .expect("history dir metadata")
+            .permissions();
+        permissions.set_mode(0o555);
+        tokio::fs::set_permissions(&dir, permissions)
+            .await
+            .expect("make history dir readonly");
+
+        let path = dir.join("jobs.json");
+        let jobs = JobManager::with_history_file(path.clone()).await;
+        let (job, created) = jobs
+            .create_unique_active("runtime-config-validate", "Validate runtime config", None)
+            .await;
+
+        if jobs.history_writable.load(Ordering::Relaxed) {
+            restore_history_test_dir(&dir).await;
+            return;
+        }
+
+        assert!(created);
+        jobs.finish(&job.id, "runtime config is valid", None).await;
+
+        let finished = jobs.get(&job.id).await.expect("finished job");
+        assert_eq!(finished.status, JobStatus::Succeeded);
+        assert!(!path.exists());
+
+        restore_history_test_dir(&dir).await;
+    }
+
     #[tokio::test]
     async fn job_manager_sanitizes_legacy_profile_update_history() {
         let path = history_test_path();
@@ -687,5 +749,27 @@ mod tests {
             .as_nanos();
         path.push(format!("clash-tui-jobs-{}-{timestamp}.json", std::process::id(),));
         path
+    }
+
+    fn history_test_dir() -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        path.push(format!("clash-tui-jobs-{}-{timestamp}", std::process::id(),));
+        path
+    }
+
+    #[cfg(unix)]
+    async fn restore_history_test_dir(dir: &PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if let Ok(metadata) = tokio::fs::metadata(dir).await {
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(0o755);
+            let _ = tokio::fs::set_permissions(dir, permissions).await;
+        }
+        let _ = tokio::fs::remove_dir_all(dir).await;
     }
 }

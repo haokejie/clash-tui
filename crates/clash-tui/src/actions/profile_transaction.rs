@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use clash_core::{IProfiles, KernelState};
+use clash_core::{KernelState, ProfileCatalog};
 
 use crate::{state::AppState, timeouts};
 
@@ -81,13 +81,13 @@ pub struct ProfileTransactionRuntime {
 #[derive(Debug, Clone)]
 pub struct ProfileTransactionOutcome<T> {
     pub output: T,
-    pub profiles: IProfiles,
+    pub profiles: ProfileCatalog,
     pub runtime: Option<ProfileTransactionRuntime>,
 }
 
 #[derive(Debug, Clone)]
 struct ProfileTransactionSnapshot {
-    profiles: IProfiles,
+    profiles: ProfileCatalog,
     profiles_config_path: PathBuf,
     profiles_config: Option<Vec<u8>>,
     profile_files: Vec<(PathBuf, Option<Vec<u8>>)>,
@@ -99,7 +99,7 @@ pub async fn run_profile_transaction<T, F, Fut>(
     mutation: F,
 ) -> Result<ProfileTransactionOutcome<T>>
 where
-    F: FnOnce(IProfiles) -> Fut,
+    F: FnOnce(ProfileCatalog) -> Fut,
     Fut: Future<Output = Result<T>>,
 {
     let _guard = match spec.lock {
@@ -159,7 +159,7 @@ async fn restore_snapshot_and_runtime(
     Ok(())
 }
 
-async fn refresh_state_profiles(state: &AppState) -> Result<IProfiles> {
+async fn refresh_state_profiles(state: &AppState) -> Result<ProfileCatalog> {
     let profiles = state.store.load_profiles().await?;
     state.config.write().await.profiles = profiles.clone();
     Ok(profiles)
@@ -168,8 +168,8 @@ async fn refresh_state_profiles(state: &AppState) -> Result<IProfiles> {
 async fn apply_runtime_policy(
     state: &AppState,
     policy: &RuntimePolicy,
-    before: &IProfiles,
-    after: &IProfiles,
+    before: &ProfileCatalog,
+    after: &ProfileCatalog,
     allow_start_core: bool,
 ) -> Result<Option<ProfileTransactionRuntime>> {
     let Some(options) = policy.commit_options(before, after) else {
@@ -202,7 +202,7 @@ async fn apply_runtime_policy(
 }
 
 impl RuntimePolicy {
-    fn commit_options(&self, before: &IProfiles, after: &IProfiles) -> Option<RuntimeCommitOptions> {
+    fn commit_options(&self, before: &ProfileCatalog, after: &ProfileCatalog) -> Option<RuntimeCommitOptions> {
         match self {
             Self::Never => None,
             Self::Always(options) => Some(*options),
@@ -264,7 +264,7 @@ impl ProfileTransactionSnapshot {
 
 async fn capture_profile_files(
     state: &AppState,
-    profiles: &IProfiles,
+    profiles: &ProfileCatalog,
     uid: &str,
     include_option_refs: bool,
 ) -> Result<Vec<(PathBuf, Option<Vec<u8>>)>> {

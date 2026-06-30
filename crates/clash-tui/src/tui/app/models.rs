@@ -15,21 +15,22 @@ pub(crate) const DIAGNOSE_RECOMMENDATION_HISTORY_LIMIT: usize = 8;
 pub(crate) const DIAGNOSE_RECOMMENDATION_VIEW_LIMIT: usize = 5;
 pub(crate) const MIN_TUI_WIDTH: u16 = 80;
 pub(crate) const MIN_TUI_HEIGHT: u16 = 20;
-pub(crate) const SETTINGS_ROWS: [SettingRow; 14] = [
+pub(crate) const SETTINGS_ROWS: [SettingRow; 15] = [
+    SettingRow::TuiTheme,
+    SettingRow::TuiDisplayMode,
+    SettingRow::TuiPunctuationMode,
+    SettingRow::MixedPort,
+    SettingRow::LogLevel,
+    SettingRow::CoreLog,
+    SettingRow::RuleProviderDownloadProxy,
     SettingRow::Dns,
     SettingRow::Ipv6,
     SettingRow::AllowLan,
     SettingRow::UnifiedDelay,
-    SettingRow::TuiTheme,
-    SettingRow::TuiDisplayMode,
-    SettingRow::TuiPunctuationMode,
-    SettingRow::LogLevel,
-    SettingRow::CoreLog,
-    SettingRow::MixedPort,
     SettingRow::ExternalController,
     SettingRow::ExternalControllerPort,
-    SettingRow::Tun,
     SettingRow::SystemProxy,
+    SettingRow::Tun,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +178,7 @@ pub(crate) enum SettingRow {
     TuiPunctuationMode,
     LogLevel,
     CoreLog,
+    RuleProviderDownloadProxy,
     MixedPort,
     ExternalController,
     ExternalControllerPort,

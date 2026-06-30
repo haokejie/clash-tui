@@ -3,7 +3,7 @@ use std::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
-use clash_core::IAppSettings;
+use clash_core::AppSettings;
 use serde::Serialize;
 
 pub const TUI_DISPLAY_MODE_ENV: &str = "CLASH_TUI_DISPLAY_MODE";
@@ -172,11 +172,11 @@ impl TuiTheme {
     }
 }
 
-pub fn configured_mode(app_settings: &IAppSettings) -> TuiDisplayMode {
+pub fn configured_mode(app_settings: &AppSettings) -> TuiDisplayMode {
     parse_display_mode(app_settings.tui_display_mode.as_deref()).unwrap_or(TuiDisplayMode::Standard)
 }
 
-pub fn summary(app_settings: &IAppSettings) -> TuiDisplayModeSummary {
+pub fn summary(app_settings: &AppSettings) -> TuiDisplayModeSummary {
     mode_summary(
         configured_mode(app_settings),
         TUI_DISPLAY_MODE_ENV,
@@ -186,11 +186,11 @@ pub fn summary(app_settings: &IAppSettings) -> TuiDisplayModeSummary {
     )
 }
 
-pub fn configured_punctuation_mode(app_settings: &IAppSettings) -> TuiPunctuationMode {
+pub fn configured_punctuation_mode(app_settings: &AppSettings) -> TuiPunctuationMode {
     parse_punctuation_mode(app_settings.tui_punctuation_mode.as_deref()).unwrap_or(TuiPunctuationMode::Preserve)
 }
 
-pub fn punctuation_summary(app_settings: &IAppSettings) -> TuiPunctuationModeSummary {
+pub fn punctuation_summary(app_settings: &AppSettings) -> TuiPunctuationModeSummary {
     mode_summary(
         configured_punctuation_mode(app_settings),
         TUI_PUNCTUATION_MODE_ENV,
@@ -200,11 +200,11 @@ pub fn punctuation_summary(app_settings: &IAppSettings) -> TuiPunctuationModeSum
     )
 }
 
-pub fn configured_theme(app_settings: &IAppSettings) -> TuiTheme {
+pub fn configured_theme(app_settings: &AppSettings) -> TuiTheme {
     parse_theme(app_settings.tui_theme.as_deref()).unwrap_or(TuiTheme::Orange)
 }
 
-pub fn theme_summary(app_settings: &IAppSettings) -> TuiThemeSummary {
+pub fn theme_summary(app_settings: &AppSettings) -> TuiThemeSummary {
     mode_summary(
         configured_theme(app_settings),
         TUI_THEME_ENV,
@@ -393,7 +393,7 @@ fn push_ascii_punctuation(
 
 #[cfg(test)]
 mod tests {
-    use clash_core::IAppSettings;
+    use clash_core::AppSettings;
 
     use super::{
         TuiDisplayMode, TuiPunctuationMode, TuiTheme, parse_display_mode, parse_punctuation_mode, parse_theme,
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn theme_defaults_to_orange_when_unconfigured() {
-        let app_settings = IAppSettings::default();
+        let app_settings = AppSettings::default();
         let summary = super::theme_summary(&app_settings);
         assert_eq!(super::configured_theme(&app_settings), TuiTheme::Orange);
         assert_eq!(summary.configured, "orange");

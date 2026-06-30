@@ -47,7 +47,7 @@ fn render_header(area: Rect, buffer: &mut Buffer, app: &TuiApp, kind: ProviderDi
             width,
         )),
         Line::from(fit_display_width(
-            "操作：↑↓ 选择 | Enter/u 更新选中 | a 更新全部 | r 刷新 | Esc 关闭",
+            "操作：↑↓ 选择 | Enter/u 更新选中 | a 更新全部 | r 刷新列表 | Esc 关闭",
             width,
         )),
         Line::from(""),

@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Result, bail};
 use clash_core::{
-    IProfiles, KernelSnapshot, KernelState, LocalProfileImport, PrfItem, RemoteProfileImport,
+    KernelSnapshot, KernelState, LocalProfileImport, ProfileCatalog, ProfileEntry, RemoteProfileImport,
     config::profiles::generate_remote_uid,
 };
 use crossterm::event::KeyCode;
@@ -30,7 +30,8 @@ use super::{
     },
     labels::{
         accepted_label, alive_label, bool_action_label, bool_label, external_controller_status_message,
-        job_status_label, kernel_state_label, mode_label, next_log_level, switch_status_message,
+        job_status_label, kernel_state_label, mode_label, next_log_level, rule_provider_download_proxy_label,
+        switch_status_message,
     },
     models::{
         BusyState, ConfirmAction, ConfirmState, DIAGNOSE_RECOMMENDATION_HISTORY_LIMIT,
@@ -62,7 +63,7 @@ pub struct TuiApp {
     pub(crate) status: String,
     pub(crate) controller_status: String,
     pub(crate) kernel_snapshot: Option<KernelSnapshot>,
-    pub(crate) profiles: Vec<PrfItem>,
+    pub(crate) profiles: Vec<ProfileEntry>,
     pub(crate) profiles_current: Option<String>,
     pub(crate) profile_index: usize,
     pub(crate) proxy_groups: Vec<ProxyGroupRow>,
@@ -1753,6 +1754,17 @@ impl TuiApp {
                     Err(err) => self.set_status(format!("错误：{err}")),
                 }
             }
+            SettingRow::RuleProviderDownloadProxy => {
+                let next = settings.rule_provider_download_proxy.next();
+                match actions::config::set_rule_provider_download_proxy(state, next).await {
+                    Ok(settings) => {
+                        let label = rule_provider_download_proxy_label(settings.rule_provider_download_proxy);
+                        self.apply_settings(settings);
+                        self.set_status(format!("规则 Provider 下载已切换为{label}"));
+                    }
+                    Err(err) => self.set_status(format!("错误：{err}")),
+                }
+            }
             SettingRow::CoreLog => {
                 let enabled = !settings.core_log_enabled;
                 let snapshot = actions::core::status(state).await;
@@ -2081,7 +2093,7 @@ impl TuiApp {
         self.move_selection(delta);
     }
 
-    pub(crate) fn apply_profiles(&mut self, profiles: IProfiles) {
+    pub(crate) fn apply_profiles(&mut self, profiles: ProfileCatalog) {
         let current_changed = self.profiles_current != profiles.current;
         self.profiles_current = profiles.current;
         self.profiles = profiles.items.unwrap_or_default();
@@ -2092,7 +2104,7 @@ impl TuiApp {
         self.clamp_selections();
     }
 
-    pub(crate) fn apply_profiles_without_runtime_reset(&mut self, profiles: IProfiles) {
+    pub(crate) fn apply_profiles_without_runtime_reset(&mut self, profiles: ProfileCatalog) {
         self.profiles_current = profiles.current;
         self.profiles = profiles.items.unwrap_or_default();
         self.restore_profile_proxy_group_selection();
@@ -2734,7 +2746,7 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn selected_profile(&self) -> Option<&PrfItem> {
+    pub(crate) fn selected_profile(&self) -> Option<&ProfileEntry> {
         self.profiles.get(self.profile_index)
     }
 

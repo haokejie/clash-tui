@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::Result;
 use clash_core::{
-    IProfiles, PrfItem, PrfOption,
+    ProfileCatalog, ProfileEntry, RemoteProfileOptions,
     config::{
         profiles::{RemoteProfileDownload, download_remote_profile},
         store::RemoteProfileUpdatePlan,
@@ -32,7 +32,7 @@ struct PreparedProfileUpdate {
 
 #[derive(Debug, Clone)]
 struct ProfileUpdateCommitResult {
-    profiles: IProfiles,
+    profiles: ProfileCatalog,
     runtime_refresh: ProfileUpdateRuntimeRefresh,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -141,7 +141,7 @@ pub async fn enqueue_due_profile_updates(state: Arc<AppState>) -> Result<Subscri
     state.config.write().await.profiles = profiles.clone();
 
     let now = current_timestamp_secs();
-    let checked = profiles.items.as_deref().map_or(0, <[PrfItem]>::len);
+    let checked = profiles.items.as_deref().map_or(0, <[ProfileEntry]>::len);
     let due_uids = due_profile_uids(&profiles, now);
     let due = due_uids.len();
     let mut jobs = Vec::new();
@@ -169,7 +169,7 @@ pub async fn enqueue_all_profile_updates(state: Arc<AppState>) -> Result<Subscri
     state.config.write().await.profiles = profiles.clone();
 
     let remote_uids = remote_profile_uids(&profiles);
-    let checked = profiles.items.as_deref().map_or(0, <[PrfItem]>::len);
+    let checked = profiles.items.as_deref().map_or(0, <[ProfileEntry]>::len);
     let due = remote_uids.len();
     let mut jobs = Vec::new();
     let mut queued = 0;
@@ -194,7 +194,7 @@ pub async fn enqueue_all_profile_updates(state: Arc<AppState>) -> Result<Subscri
 pub async fn start_profile_update_job(
     state: Arc<AppState>,
     uid: String,
-    option: Option<PrfOption>,
+    option: Option<RemoteProfileOptions>,
 ) -> StartedProfileUpdateJob {
     let (job, created) = state
         .jobs
@@ -218,7 +218,12 @@ pub async fn start_profile_update_job(
     StartedProfileUpdateJob { job, created }
 }
 
-async fn run_profile_update_job(state: Arc<AppState>, job_id: String, uid: String, option: Option<PrfOption>) {
+async fn run_profile_update_job(
+    state: Arc<AppState>,
+    job_id: String,
+    uid: String,
+    option: Option<RemoteProfileOptions>,
+) {
     state
         .jobs
         .start(&job_id, "downloading remote profile via direct connection")
@@ -311,7 +316,7 @@ async fn update_remote_profile_with_retry(
     state: &AppState,
     job_id: &str,
     uid: &str,
-    option: Option<&PrfOption>,
+    option: Option<&RemoteProfileOptions>,
 ) -> Result<PreparedProfileUpdate> {
     let attempts = [
         ("direct", Some(proxy_option(option, Some(false), Some(false)))),
@@ -338,7 +343,11 @@ async fn update_remote_profile_with_retry(
     anyhow::bail!("all subscription update attempts failed: {}", errors.join("; "))
 }
 
-fn proxy_option(base: Option<&PrfOption>, with_proxy: Option<bool>, self_proxy: Option<bool>) -> PrfOption {
+fn proxy_option(
+    base: Option<&RemoteProfileOptions>,
+    with_proxy: Option<bool>,
+    self_proxy: Option<bool>,
+) -> RemoteProfileOptions {
     let mut option = base.cloned().unwrap_or_default();
     option.with_proxy = with_proxy;
     option.self_proxy = self_proxy;
@@ -359,7 +368,7 @@ fn redact_urls(message: &str) -> String {
         .join(" ")
 }
 
-fn due_profile_uids(profiles: &IProfiles, now: u64) -> Vec<String> {
+fn due_profile_uids(profiles: &ProfileCatalog, now: u64) -> Vec<String> {
     profiles
         .items
         .as_deref()
@@ -369,7 +378,7 @@ fn due_profile_uids(profiles: &IProfiles, now: u64) -> Vec<String> {
         .collect()
 }
 
-fn remote_profile_uids(profiles: &IProfiles) -> Vec<String> {
+fn remote_profile_uids(profiles: &ProfileCatalog) -> Vec<String> {
     profiles
         .items
         .as_deref()
@@ -382,10 +391,10 @@ fn remote_profile_uids(profiles: &IProfiles) -> Vec<String> {
 
 fn profile_update_job_result(
     uid: &str,
-    profiles: &IProfiles,
+    profiles: &ProfileCatalog,
     runtime_refresh: &ProfileUpdateRuntimeRefresh,
 ) -> serde_json::Value {
-    let profile_count = profiles.items.as_deref().map_or(0, <[PrfItem]>::len);
+    let profile_count = profiles.items.as_deref().map_or(0, <[ProfileEntry]>::len);
     serde_json::json!({
         "uid": uid,
         "profileCount": profile_count,
@@ -398,7 +407,7 @@ fn profile_update_job_result(
     })
 }
 
-fn due_profile_uid(item: &PrfItem, now: u64) -> Option<String> {
+fn due_profile_uid(item: &ProfileEntry, now: u64) -> Option<String> {
     if item.itype.as_deref() != Some("remote") || item.url.is_none() {
         return None;
     }
@@ -420,7 +429,7 @@ fn due_profile_uid(item: &PrfItem, now: u64) -> Option<String> {
         .flatten()
 }
 
-fn subscription_profile_status(item: &PrfItem, jobs: &[JobRecord], now: u64) -> SubscriptionProfileStatus {
+fn subscription_profile_status(item: &ProfileEntry, jobs: &[JobRecord], now: u64) -> SubscriptionProfileStatus {
     let uid = item.uid.clone();
     let remote = item.itype.as_deref() == Some("remote") && item.url.is_some();
     let option = item.option.as_ref();
@@ -509,7 +518,7 @@ mod tests {
     };
 
     use clash_core::{
-        IProfiles, PrfItem, PrfOption, RemoteProfileImport,
+        ProfileCatalog, ProfileEntry, RemoteProfileImport, RemoteProfileOptions,
         config::{profiles::RemoteProfileDownload, store::RemoteProfileUpdatePlan},
     };
 
@@ -520,31 +529,31 @@ mod tests {
     };
     use crate::{options::ClashTuiOptions, state::AppState};
 
-    fn remote(uid: &str, updated: Option<usize>, interval: Option<u64>, allow: Option<bool>) -> PrfItem {
-        PrfItem {
+    fn remote(uid: &str, updated: Option<usize>, interval: Option<u64>, allow: Option<bool>) -> ProfileEntry {
+        ProfileEntry {
             uid: Some(uid.into()),
             itype: Some("remote".into()),
             url: Some("https://example.test/sub".into()),
             updated,
-            option: Some(PrfOption {
+            option: Some(RemoteProfileOptions {
                 update_interval: interval,
                 allow_auto_update: allow,
-                ..PrfOption::default()
+                ..RemoteProfileOptions::default()
             }),
-            ..PrfItem::default()
+            ..ProfileEntry::default()
         }
     }
 
     #[test]
     fn due_profile_uids_respect_interval_and_auto_update_flag() {
-        let profiles = IProfiles {
+        let profiles = ProfileCatalog {
             current: None,
             items: Some(vec![
                 remote("due", Some(100), Some(1), Some(true)),
                 remote("fresh", Some(580), Some(1), Some(true)),
                 remote("disabled", Some(100), Some(1), Some(false)),
                 remote("missing-updated", None, Some(1), Some(true)),
-                PrfItem {
+                ProfileEntry {
                     uid: Some("local".into()),
                     itype: Some("local".into()),
                     ..remote("local", Some(100), Some(1), Some(true))
@@ -589,7 +598,7 @@ mod tests {
 
     #[test]
     fn profile_update_job_result_omits_remote_urls() {
-        let profiles = IProfiles {
+        let profiles = ProfileCatalog {
             current: Some("remote".into()),
             items: Some(vec![remote("remote", Some(100), Some(1), Some(true))]),
         };
@@ -663,15 +672,15 @@ mod tests {
             ClashTuiOptions::new(Some(root.clone()), Some(root.join("resources")), None, 300).expect("options");
         let state = AppState::initialize(options).await.expect("state");
 
-        let profiles = IProfiles {
+        let profiles = ProfileCatalog {
             current: Some("Rcurrent".into()),
-            items: Some(vec![PrfItem {
+            items: Some(vec![ProfileEntry {
                 uid: Some("Rcurrent".into()),
                 itype: Some("remote".into()),
                 name: Some("Current".into()),
                 file: Some("Rcurrent.yaml".into()),
                 url: Some("https://example.test/current".into()),
-                ..PrfItem::default()
+                ..ProfileEntry::default()
             }]),
         };
         profiles
@@ -736,24 +745,24 @@ rules: []
             ClashTuiOptions::new(Some(root.clone()), Some(root.join("resources")), None, 300).expect("options");
         let state = AppState::initialize(options).await.expect("state");
 
-        let profiles = IProfiles {
+        let profiles = ProfileCatalog {
             current: Some("Rcurrent".into()),
             items: Some(vec![
-                PrfItem {
+                ProfileEntry {
                     uid: Some("Rcurrent".into()),
                     itype: Some("remote".into()),
                     name: Some("Current".into()),
                     file: Some("Rcurrent.yaml".into()),
                     url: Some("https://example.test/current".into()),
-                    ..PrfItem::default()
+                    ..ProfileEntry::default()
                 },
-                PrfItem {
+                ProfileEntry {
                     uid: Some("Rother".into()),
                     itype: Some("remote".into()),
                     name: Some("Other".into()),
                     file: Some("Rother.yaml".into()),
                     url: Some("https://example.test/other".into()),
-                    ..PrfItem::default()
+                    ..ProfileEntry::default()
                 },
             ]),
         };
@@ -800,15 +809,15 @@ rules: []
         let options =
             ClashTuiOptions::new(Some(root.clone()), Some(root.join("resources")), None, 300).expect("options");
         let state = AppState::initialize(options).await.expect("state");
-        let profiles = IProfiles {
+        let profiles = ProfileCatalog {
             current: Some("Rbroken".into()),
-            items: Some(vec![PrfItem {
+            items: Some(vec![ProfileEntry {
                 uid: Some("Rbroken".into()),
                 itype: Some("remote".into()),
                 name: Some("Broken".into()),
                 file: Some("broken.yaml".into()),
                 url: Some("https://example.test/broken".into()),
-                ..PrfItem::default()
+                ..ProfileEntry::default()
             }]),
         };
         profiles

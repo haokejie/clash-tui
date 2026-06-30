@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::actions::system::SwitchStatus;
-use clash_core::{IAppSettings, constants::network};
+use clash_core::{AppSettings, constants::network};
 use serde::Serialize;
 
 const DEFAULT_SYSTEM_PROXY_BYPASS: &str = "localhost,127.0.0.1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,::1";
@@ -132,7 +132,7 @@ pub fn system_proxy_status(enabled: bool) -> SwitchStatus {
     }
 }
 
-pub fn system_proxy_diagnostics(app_settings: &IAppSettings) -> SystemProxyDiagnostics {
+pub fn system_proxy_diagnostics(app_settings: &AppSettings) -> SystemProxyDiagnostics {
     let (host, port, bypass) = system_proxy_endpoint(app_settings);
     let endpoint = SystemProxyEndpoint { host, port, bypass };
 
@@ -164,7 +164,7 @@ pub fn system_proxy_diagnostics(app_settings: &IAppSettings) -> SystemProxyDiagn
     }
 }
 
-pub fn apply_system_proxy(app_settings: &IAppSettings, enabled: bool) -> SwitchStatus {
+pub fn apply_system_proxy(app_settings: &AppSettings, enabled: bool) -> SwitchStatus {
     #[cfg(target_os = "linux")]
     {
         linux_apply_system_proxy(app_settings, enabled)
@@ -209,7 +209,7 @@ const fn platform_name() -> &'static str {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_apply_system_proxy(app_settings: &IAppSettings, enabled: bool) -> SwitchStatus {
+fn linux_apply_system_proxy(app_settings: &AppSettings, enabled: bool) -> SwitchStatus {
     let mut status = system_proxy_status(enabled);
     let (host, port, bypass) = system_proxy_endpoint(app_settings);
     let diagnostics = linux_system_proxy_diagnostics(SystemProxyEndpoint {
@@ -255,7 +255,7 @@ fn linux_apply_system_proxy(app_settings: &IAppSettings, enabled: bool) -> Switc
     status
 }
 
-fn system_proxy_endpoint(app_settings: &IAppSettings) -> (String, u16, String) {
+fn system_proxy_endpoint(app_settings: &AppSettings) -> (String, u16, String) {
     let host = app_settings.proxy_host.as_deref().unwrap_or("127.0.0.1").to_owned();
     let port = app_settings.mixed_port.unwrap_or(network::ports::DEFAULT_MIXED);
     let bypass = app_settings
@@ -749,7 +749,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_system_proxy_diagnostics_reports_endpoint_without_url_scheme() {
-        let app_settings = clash_core::IAppSettings {
+        let app_settings = clash_core::AppSettings {
             proxy_host: Some("127.0.0.1".into()),
             mixed_port: Some(7897),
             system_proxy_bypass: Some("localhost,127.0.0.1".into()),

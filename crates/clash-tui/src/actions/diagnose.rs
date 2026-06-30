@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use clash_core::{KernelSnapshot, KernelState, PrfItem};
+use clash_core::{KernelSnapshot, KernelState, ProfileEntry};
 use serde::Serialize;
 use serde_yaml_ng::{Mapping, Value};
 
@@ -369,8 +369,8 @@ const fn diagnose_status(
     }
 }
 
-impl From<PrfItem> for ProfileBrief {
-    fn from(item: PrfItem) -> Self {
+impl From<ProfileEntry> for ProfileBrief {
+    fn from(item: ProfileEntry) -> Self {
         Self {
             uid: item.uid,
             name: item.name,

@@ -14,20 +14,17 @@ const RULE_PAYLOAD_WIDTH: usize = 44;
 pub fn render(area: Rect, buffer: &mut ratatui::buffer::Buffer, app: &TuiApp) {
     let indices = app.filtered_rule_indices();
     let content_width = usize::from(area.width.saturating_sub(4)).max(32);
-    let provider_hint = if app.rule_providers.is_empty() {
-        ""
+    let action_line = if app.rule_providers.is_empty() {
+        "操作：↑↓查看 | / 按类型、内容、代理过滤".to_owned()
     } else {
-        " | p Provider"
+        "操作：↑↓查看 | p 规则 Provider | 弹窗内 u/a 更新规则 | / 过滤".to_owned()
     };
     let lines = vec![
         Line::from(fit_display_width(
             &format!("规则：{} | 显示：{}", app.rules.len(), indices.len()),
             content_width,
         )),
-        Line::from(fit_display_width(
-            &format!("操作：↑↓查看{provider_hint} | / 按类型、内容、代理过滤"),
-            content_width,
-        )),
+        Line::from(fit_display_width(&action_line, content_width)),
         Line::from(""),
     ];
 

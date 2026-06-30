@@ -132,9 +132,11 @@ const fn setting_action(row: SettingRow) -> &'static str {
     match row {
         SettingRow::MixedPort | SettingRow::ExternalControllerPort => "编辑",
         SettingRow::CoreLog | SettingRow::ExternalController | SettingRow::Tun | SettingRow::SystemProxy => "确认",
-        SettingRow::TuiTheme | SettingRow::TuiDisplayMode | SettingRow::TuiPunctuationMode | SettingRow::LogLevel => {
-            "循环"
-        }
+        SettingRow::TuiTheme
+        | SettingRow::TuiDisplayMode
+        | SettingRow::TuiPunctuationMode
+        | SettingRow::RuleProviderDownloadProxy
+        | SettingRow::LogLevel => "循环",
         _ => "切换",
     }
 }
@@ -148,6 +150,7 @@ const fn setting_description(row: SettingRow) -> &'static str {
         SettingRow::TuiTheme => "深橙/蓝色；统一全局背景",
         SettingRow::TuiDisplayMode => "标准/基础线框",
         SettingRow::TuiPunctuationMode => "保留/优化标点/常见标点",
+        SettingRow::RuleProviderDownloadProxy => "规则 Provider 下载走配置或直连",
         SettingRow::LogLevel => "循环 debug/info/warning/error/silent",
         SettingRow::CoreLog => "控制 mihomo 日志落盘；运行中需重启",
         SettingRow::MixedPort => "编辑本机混合代理端口",
