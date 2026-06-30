@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AppPathSummary, AppPaths,
     config::{
-        ClashInfo, IAppSettings, IClashTemp, IProfiles, LocalProfileImport, PrfItem, PrfOption, RemoteProfileImport,
-        dns,
+        AppSettings, BaseConfig, ClashInfo, LocalProfileImport, ProfileCatalog, ProfileEntry, RemoteProfileImport,
+        RemoteProfileOptions, dns,
         profiles::{
             GLOBAL_PROFILE_DEFAULTS, RemoteProfileDownload, download_remote_profile, generate_local_uid,
             generate_remote_uid, remote_profile_name_override_for_update, validate_profile_uid, validate_profile_yaml,
@@ -30,9 +30,9 @@ pub enum ConfigFile {
 pub struct ConfigLoadResult {
     pub paths: AppPaths,
     pub created_files: Vec<ConfigFile>,
-    pub clash: IClashTemp,
-    pub app_settings: IAppSettings,
-    pub profiles: IProfiles,
+    pub clash: BaseConfig,
+    pub app_settings: AppSettings,
+    pub profiles: ProfileCatalog,
 }
 
 impl ConfigLoadResult {
@@ -56,7 +56,7 @@ pub struct ConfigStore {
 pub struct RemoteProfileUpdatePlan {
     pub uid: String,
     pub request: RemoteProfileImport,
-    pub option: Option<PrfOption>,
+    pub option: Option<RemoteProfileOptions>,
 }
 
 impl ConfigStore {
@@ -88,28 +88,28 @@ impl ConfigStore {
         })
     }
 
-    pub async fn load_app_settings(&self) -> Result<IAppSettings> {
+    pub async fn load_app_settings(&self) -> Result<AppSettings> {
         yaml::read_yaml(&self.paths.settings_config)
             .await
             .with_context(|| format!("failed to load {}", self.paths.settings_config.display()))
     }
 
-    pub async fn load_clash(&self) -> Result<IClashTemp> {
+    pub async fn load_clash(&self) -> Result<BaseConfig> {
         let mapping = yaml::read_mapping(&self.paths.clash_config)
             .await
             .with_context(|| format!("failed to load {}", self.paths.clash_config.display()))?;
-        Ok(IClashTemp::from_mapping(mapping, Some(&self.paths.ipc_path)))
+        Ok(BaseConfig::from_mapping(mapping, Some(&self.paths.ipc_path)))
     }
 
-    pub async fn patch_clash(&self, patch: &serde_yaml_ng::Mapping) -> Result<IClashTemp> {
+    pub async fn patch_clash(&self, patch: &serde_yaml_ng::Mapping) -> Result<BaseConfig> {
         self.paths.ensure_dirs()?;
-        let mut clash = IClashTemp::load_or_template(&self.paths.clash_config, Some(&self.paths.ipc_path)).await;
+        let mut clash = BaseConfig::load_or_template(&self.paths.clash_config, Some(&self.paths.ipc_path)).await;
         clash.patch_config(patch);
         clash.save_config(&self.paths.clash_config).await?;
         Ok(clash)
     }
 
-    pub async fn patch_app_settings(&self, patch: &IAppSettings) -> Result<IAppSettings> {
+    pub async fn patch_app_settings(&self, patch: &AppSettings) -> Result<AppSettings> {
         self.paths.ensure_dirs()?;
         let mut app_settings = self.load_app_settings().await.unwrap_or_default();
         app_settings.patch_config(patch);
@@ -117,20 +117,20 @@ impl ConfigStore {
         Ok(app_settings)
     }
 
-    pub async fn load_profiles(&self) -> Result<IProfiles> {
+    pub async fn load_profiles(&self) -> Result<ProfileCatalog> {
         yaml::read_yaml(&self.paths.profiles_config)
             .await
             .with_context(|| format!("failed to load {}", self.paths.profiles_config.display()))
     }
 
-    pub async fn switch_profile(&self, uid: &str) -> Result<IProfiles> {
+    pub async fn switch_profile(&self, uid: &str) -> Result<ProfileCatalog> {
         let mut profiles = self.load_profiles().await?;
         profiles.switch_current(uid)?;
         profiles.save_file(&self.paths.profiles_config).await?;
         Ok(profiles)
     }
 
-    pub async fn patch_profile(&self, uid: &str, patch: &PrfItem) -> Result<IProfiles> {
+    pub async fn patch_profile(&self, uid: &str, patch: &ProfileEntry) -> Result<ProfileCatalog> {
         self.paths.ensure_dirs()?;
         validate_profile_uid(uid)?;
         let mut profiles = self.load_profiles().await?;
@@ -139,7 +139,7 @@ impl ConfigStore {
         Ok(profiles)
     }
 
-    pub async fn reorder_profiles(&self, active_id: &str, over_id: &str) -> Result<IProfiles> {
+    pub async fn reorder_profiles(&self, active_id: &str, over_id: &str) -> Result<ProfileCatalog> {
         self.paths.ensure_dirs()?;
         validate_profile_uid(active_id)?;
         validate_profile_uid(over_id)?;
@@ -164,7 +164,7 @@ impl ConfigStore {
         Ok(profiles)
     }
 
-    pub async fn delete_profile(&self, uid: &str) -> Result<IProfiles> {
+    pub async fn delete_profile(&self, uid: &str) -> Result<ProfileCatalog> {
         self.paths.ensure_dirs()?;
         validate_profile_uid(uid)?;
 
@@ -260,7 +260,7 @@ impl ConfigStore {
         Ok(ValidationOutcome::Valid)
     }
 
-    pub async fn import_local_profile(&self, input: &LocalProfileImport) -> Result<IProfiles> {
+    pub async fn import_local_profile(&self, input: &LocalProfileImport) -> Result<ProfileCatalog> {
         self.paths.ensure_dirs()?;
         validate_profile_yaml(&input.file_data)?;
 
@@ -284,19 +284,19 @@ impl ConfigStore {
             .await
             .with_context(|| format!("failed to write profile {}", path.display()))?;
 
-        profiles.append_metadata(PrfItem {
+        profiles.append_metadata(ProfileEntry {
             uid: Some(uid),
             itype: Some("local".into()),
             name: input.name.clone().or_else(|| Some("Local Profile".into())),
             file: Some(file),
             updated: Some(current_timestamp_secs()),
-            ..PrfItem::default()
+            ..ProfileEntry::default()
         })?;
         profiles.save_file(&self.paths.profiles_config).await?;
         Ok(profiles)
     }
 
-    pub async fn import_remote_profile(&self, input: &RemoteProfileImport) -> Result<IProfiles> {
+    pub async fn import_remote_profile(&self, input: &RemoteProfileImport) -> Result<ProfileCatalog> {
         self.paths.ensure_dirs()?;
         let remote = download_remote_profile(input).await?;
         self.commit_remote_profile_import(input, remote).await
@@ -306,7 +306,7 @@ impl ConfigStore {
         &self,
         input: &RemoteProfileImport,
         remote: RemoteProfileDownload,
-    ) -> Result<IProfiles> {
+    ) -> Result<ProfileCatalog> {
         self.paths.ensure_dirs()?;
         let mut profiles = self.load_profiles().await.unwrap_or_default();
         let uid = match input.uid.as_deref().filter(|uid| !uid.trim().is_empty()) {
@@ -328,7 +328,7 @@ impl ConfigStore {
             .await
             .with_context(|| format!("failed to write profile {}", path.display()))?;
 
-        profiles.append_metadata(PrfItem {
+        profiles.append_metadata(ProfileEntry {
             uid: Some(uid),
             itype: Some("remote".into()),
             name: Some(remote.name),
@@ -339,13 +339,17 @@ impl ConfigStore {
             updated: Some(current_timestamp_secs()),
             option: Some(merge_remote_option(input.option.as_ref(), remote.update_interval)),
             home: remote.home,
-            ..PrfItem::default()
+            ..ProfileEntry::default()
         })?;
         profiles.save_file(&self.paths.profiles_config).await?;
         Ok(profiles)
     }
 
-    pub async fn update_remote_profile(&self, uid: &str, option: Option<&PrfOption>) -> Result<IProfiles> {
+    pub async fn update_remote_profile(
+        &self,
+        uid: &str,
+        option: Option<&RemoteProfileOptions>,
+    ) -> Result<ProfileCatalog> {
         let plan = self.prepare_remote_profile_update(uid, option).await?;
         let remote = download_remote_profile(&plan.request).await?;
         self.commit_remote_profile_update(&plan, remote).await
@@ -354,7 +358,7 @@ impl ConfigStore {
     pub async fn prepare_remote_profile_update(
         &self,
         uid: &str,
-        option: Option<&PrfOption>,
+        option: Option<&RemoteProfileOptions>,
     ) -> Result<RemoteProfileUpdatePlan> {
         self.paths.ensure_dirs()?;
         let profiles = self.load_profiles().await?;
@@ -363,7 +367,7 @@ impl ConfigStore {
             bail!("profile \"uid:{uid}\" is not remote");
         }
         let url = item.url.clone().context("remote profile url is missing")?;
-        let option = PrfOption::merge(item.option.as_ref(), option);
+        let option = RemoteProfileOptions::merge(item.option.as_ref(), option);
         let name = remote_profile_name_override_for_update(item.name.as_deref(), &url);
         Ok(RemoteProfileUpdatePlan {
             uid: uid.to_owned(),
@@ -382,7 +386,7 @@ impl ConfigStore {
         &self,
         plan: &RemoteProfileUpdatePlan,
         remote: RemoteProfileDownload,
-    ) -> Result<IProfiles> {
+    ) -> Result<ProfileCatalog> {
         self.paths.ensure_dirs()?;
         let mut profiles = self.load_profiles().await?;
         let item = profiles.get_item(&plan.uid)?.clone();
@@ -397,7 +401,7 @@ impl ConfigStore {
 
         profiles.patch_item(
             &plan.uid,
-            &PrfItem {
+            &ProfileEntry {
                 name: Some(remote.name),
                 file: Some(file),
                 url: Some(remote.url),
@@ -405,7 +409,7 @@ impl ConfigStore {
                 updated: Some(current_timestamp_secs()),
                 option: Some(merge_remote_option(plan.option.as_ref(), remote.update_interval)),
                 home: remote.home,
-                ..PrfItem::default()
+                ..ProfileEntry::default()
             },
         )?;
         profiles.save_file(&self.paths.profiles_config).await?;
@@ -429,9 +433,9 @@ impl ConfigStore {
         Ok(self.paths.profiles_dir.join(relative))
     }
 
-    async fn ensure_clash(&self, created_files: &mut Vec<ConfigFile>) -> Result<IClashTemp> {
+    async fn ensure_clash(&self, created_files: &mut Vec<ConfigFile>) -> Result<BaseConfig> {
         if !path_exists(&self.paths.clash_config).await {
-            let clash = IClashTemp::template_with_ipc(Some(&self.paths.ipc_path));
+            let clash = BaseConfig::template_with_ipc(Some(&self.paths.ipc_path));
             clash.save_config(&self.paths.clash_config).await?;
             created_files.push(ConfigFile::Clash);
             return Ok(clash);
@@ -440,12 +444,12 @@ impl ConfigStore {
         let mapping = yaml::read_mapping(&self.paths.clash_config)
             .await
             .with_context(|| format!("failed to load {}", self.paths.clash_config.display()))?;
-        Ok(IClashTemp::from_mapping(mapping, Some(&self.paths.ipc_path)))
+        Ok(BaseConfig::from_mapping(mapping, Some(&self.paths.ipc_path)))
     }
 
-    async fn ensure_app_settings(&self, created_files: &mut Vec<ConfigFile>) -> Result<IAppSettings> {
+    async fn ensure_app_settings(&self, created_files: &mut Vec<ConfigFile>) -> Result<AppSettings> {
         if !path_exists(&self.paths.settings_config).await {
-            let app_settings = IAppSettings::default();
+            let app_settings = AppSettings::default();
             app_settings.save_file(&self.paths.settings_config).await?;
             created_files.push(ConfigFile::Settings);
             return Ok(app_settings);
@@ -456,11 +460,11 @@ impl ConfigStore {
             .with_context(|| format!("failed to load {}", self.paths.settings_config.display()))
     }
 
-    async fn ensure_profiles(&self, created_files: &mut Vec<ConfigFile>) -> Result<IProfiles> {
+    async fn ensure_profiles(&self, created_files: &mut Vec<ConfigFile>) -> Result<ProfileCatalog> {
         let mut created_profiles_config = false;
         let mut profiles = if !path_exists(&self.paths.profiles_config).await {
             created_profiles_config = true;
-            IProfiles::default()
+            ProfileCatalog::default()
         } else {
             yaml::read_yaml(&self.paths.profiles_config)
                 .await
@@ -525,7 +529,7 @@ fn current_timestamp_secs() -> usize {
         .unwrap_or(usize::MAX)
 }
 
-fn merge_remote_option(option: Option<&PrfOption>, update_interval: Option<u64>) -> PrfOption {
+fn merge_remote_option(option: Option<&RemoteProfileOptions>, update_interval: Option<u64>) -> RemoteProfileOptions {
     let mut option = option.cloned().unwrap_or_default();
     option.update_interval = update_interval.or(option.update_interval);
     option.allow_auto_update = option.allow_auto_update.or(Some(true));
@@ -536,7 +540,7 @@ async fn path_exists(path: &Path) -> bool {
     tokio::fs::try_exists(path).await.unwrap_or(false)
 }
 
-fn remove_profile_item(profiles: &mut IProfiles, uid: &str, files: &mut Vec<String>) -> bool {
+fn remove_profile_item(profiles: &mut ProfileCatalog, uid: &str, files: &mut Vec<String>) -> bool {
     let Some(items) = profiles.items.as_mut() else {
         return false;
     };
@@ -568,7 +572,7 @@ mod tests {
 
     use crate::{
         AppPaths, ValidationOutcome,
-        config::{LocalProfileImport, PrfItem, PrfSelected, RemoteProfileImport},
+        config::{LocalProfileImport, ProfileEntry, ProxySelection, RemoteProfileImport},
     };
 
     #[tokio::test]
@@ -722,12 +726,12 @@ mod tests {
         let profiles = store
             .patch_profile(
                 "L001",
-                &PrfItem {
-                    selected: Some(vec![PrfSelected {
+                &ProfileEntry {
+                    selected: Some(vec![ProxySelection {
                         name: Some("GLOBAL".into()),
                         now: Some("DIRECT".into()),
                     }]),
-                    ..PrfItem::default()
+                    ..ProfileEntry::default()
                 },
             )
             .await
@@ -863,23 +867,23 @@ mod tests {
         let store = ConfigStore::new(AppPaths::from_home(&root));
         store.initialize().await.expect("initialize configs");
         let app_settings = store
-            .patch_app_settings(&crate::config::IAppSettings {
+            .patch_app_settings(&crate::config::AppSettings {
                 mixed_port: Some(19090),
-                enable_auto_launch: Some(true),
+                enable_tun_mode: Some(true),
                 enable_system_proxy: Some(true),
                 proxy_host: Some("127.0.0.1".into()),
-                ..crate::config::IAppSettings::default()
+                ..crate::config::AppSettings::default()
             })
             .await
             .expect("patch app_settings");
 
         assert_eq!(app_settings.mixed_port, Some(19090));
-        assert_eq!(app_settings.enable_auto_launch, Some(true));
+        assert_eq!(app_settings.enable_tun_mode, Some(true));
         assert_eq!(app_settings.enable_system_proxy, Some(true));
         assert_eq!(app_settings.proxy_host.as_deref(), Some("127.0.0.1"));
         let loaded = store.load_app_settings().await.expect("load app_settings");
         assert_eq!(loaded.mixed_port, Some(19090));
-        assert_eq!(loaded.enable_auto_launch, Some(true));
+        assert_eq!(loaded.enable_tun_mode, Some(true));
         assert_eq!(loaded.enable_system_proxy, Some(true));
         assert_eq!(loaded.proxy_host.as_deref(), Some("127.0.0.1"));
 

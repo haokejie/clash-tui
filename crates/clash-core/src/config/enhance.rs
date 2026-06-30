@@ -15,6 +15,7 @@ const MAX_OUTPUT_SIZE: usize = 1024 * 1024;
 const MAX_JSON_SIZE: usize = 10 * 1024 * 1024;
 const MAX_LOOP_ITERATIONS: u64 = 10_000_000;
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
+const SCRIPT_ERROR_PREFIX: &str = "__clash_tui_script_error__ ";
 
 pub fn use_merge(merge: &Mapping, config: Mapping) -> Mapping {
     let mut config = Value::from(config);
@@ -89,19 +90,14 @@ fn use_script_sync(script: String, config: &Mapping, name: &str) -> Result<(Mapp
         bail!("Configuration size exceeds maximum allowed size");
     }
 
-    let safe_name = escape_js_string_for_single_quote(name);
-    if safe_name.len() > 1024 {
+    if name.len() > 1024 {
         bail!("Name parameter too long");
     }
 
-    let code = format!(
-        r"try{{
-        {script};
-        JSON.stringify(main({config_str},'{safe_name}')||'')
-      }} catch(err) {{
-        `__error_flag__ ${{err.toString()}}`
-      }}"
-    );
+    let name_json = serde_json::to_string(name).context("failed to serialize script profile name")?;
+    let error_prefix_json =
+        serde_json::to_string(SCRIPT_ERROR_PREFIX).context("failed to serialize script error prefix")?;
+    let code = build_script_invocation(&script, &config_str, &name_json, &error_prefix_json);
 
     let result = context
         .eval(Source::from_bytes(code.as_str()))
@@ -116,7 +112,7 @@ fn use_script_sync(script: String, config: &Mapping, name: &str) -> Result<(Mapp
         .to_std_string()
         .map_err(|_| anyhow!("failed to convert script result to UTF-8 string"))?;
 
-    if let Some(message) = result.strip_prefix("__error_flag__ ") {
+    if let Some(message) = result.strip_prefix(SCRIPT_ERROR_PREFIX) {
         bail!("script execution error: {message}");
     }
     if result.len() > MAX_JSON_SIZE {
@@ -153,48 +149,60 @@ fn parse_json_safely(json_str: &str) -> Result<Mapping> {
         bail!("JSON string too large");
     }
 
-    let json_str = strip_outer_quotes(json_str);
+    let json_str = unquote_json_payload(json_str);
     serde_json::from_str::<Mapping>(json_str).context("main function should return object")
 }
 
-fn strip_outer_quotes(s: &str) -> &str {
-    let s = s.trim();
-    if s.len() < 2 {
-        return s;
+fn build_script_invocation(script: &str, config_json: &str, name_json: &str, error_prefix_json: &str) -> String {
+    format!(
+        "(function() {{\n\
+         {script}\n\
+         try {{\n\
+           const __clashTuiConfig = {config_json};\n\
+           const __clashTuiProfileName = {name_json};\n\
+           const __clashTuiResult = main(__clashTuiConfig, __clashTuiProfileName);\n\
+           return JSON.stringify(__clashTuiResult || \"\");\n\
+         }} catch (__clashTuiError) {{\n\
+           return {error_prefix_json} + String(__clashTuiError);\n\
+         }}\n\
+       }})()"
+    )
+}
+
+fn unquote_json_payload(input: &str) -> &str {
+    let trimmed = input.trim();
+    let Some(first) = trimmed.as_bytes().first() else {
+        return trimmed;
+    };
+    if trimmed.len() < 2 {
+        return trimmed;
     }
 
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-        &s[1..s.len() - 1]
+    let last = trimmed.as_bytes().last();
+    if matches!(*first, b'"' | b'\'') && last == Some(first) {
+        &trimmed[1..trimmed.len() - 1]
     } else {
-        s
+        trimmed
     }
 }
 
-fn escape_js_string_for_single_quote(s: &str) -> String {
-    s.chars()
-        .take(10_240)
-        .flat_map(|ch| match ch {
-            '\\' => "\\\\".chars().collect::<Vec<_>>(),
-            '\'' => "\\'".chars().collect(),
-            '\n' => "\\n".chars().collect(),
-            '\r' => "\\r".chars().collect(),
-            _ => vec![ch],
-        })
-        .collect()
-}
+fn deep_merge(target: &mut Value, overlay: Value) {
+    let Value::Mapping(overlay) = overlay else {
+        *target = overlay;
+        return;
+    };
+    let Some(target) = target.as_mapping_mut() else {
+        *target = Value::Mapping(overlay);
+        return;
+    };
 
-fn deep_merge(a: &mut Value, b: Value) {
-    match (a, b) {
-        (Value::Mapping(a_map), Value::Mapping(b_map)) => {
-            for (key, value) in b_map {
-                if let Some(existing) = a_map.get_mut(&key) {
-                    deep_merge(existing, value);
-                } else {
-                    a_map.insert(key, value);
-                }
+    for (key, value) in overlay {
+        match target.get_mut(&key) {
+            Some(existing) => deep_merge(existing, value),
+            None => {
+                target.insert(key, value);
             }
         }
-        (a, b) => *a = b,
     }
 }
 

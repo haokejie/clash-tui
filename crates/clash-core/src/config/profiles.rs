@@ -11,34 +11,35 @@ use base64::{
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
 };
 use percent_encoding::percent_decode_str;
-use reqwest::header::{CONTENT_DISPOSITION, HeaderMap};
+use reqwest::header::{CONTENT_DISPOSITION, HeaderMap, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::{Mapping, Value};
 
 use crate::{
+    config::subscription_headers,
     constants::{network, timeouts},
     yaml,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct PrfItem {
+pub struct ProfileEntry {
     pub uid: Option<String>,
+    pub name: Option<String>,
     #[serde(rename = "type")]
     pub itype: Option<String>,
-    pub name: Option<String>,
     pub file: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub desc: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected: Option<Vec<PrfSelected>>,
+    pub desc: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub extra: Option<PrfExtra>,
+    pub option: Option<RemoteProfileOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<Vec<ProxySelection>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<SubscriptionUsage>,
     pub updated: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub option: Option<PrfOption>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
     #[serde(skip)]
@@ -46,13 +47,13 @@ pub struct PrfItem {
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct PrfSelected {
+pub struct ProxySelection {
     pub name: Option<String>,
     pub now: Option<String>,
 }
 
 #[derive(Default, Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-pub struct PrfExtra {
+pub struct SubscriptionUsage {
     pub upload: u64,
     pub download: u64,
     pub total: u64,
@@ -61,54 +62,55 @@ pub struct PrfExtra {
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct PrfOption {
+pub struct RemoteProfileOptions {
+    pub timeout_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_agent: Option<String>,
+    pub update_interval: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub with_proxy: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub self_proxy: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub update_interval: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout_seconds: Option<u64>,
+    pub allow_auto_update: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub danger_accept_invalid_certs: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allow_auto_update: Option<bool>,
     pub merge: Option<String>,
-    pub script: Option<String>,
     pub rules: Option<String>,
-    pub proxies: Option<String>,
+    pub script: Option<String>,
     pub groups: Option<String>,
+    pub proxies: Option<String>,
 }
 
-impl PrfOption {
+impl RemoteProfileOptions {
     #[must_use]
     pub fn merge(one: Option<&Self>, other: Option<&Self>) -> Option<Self> {
         match (one, other) {
-            (Some(base), Some(patch)) => {
-                let mut result = base.clone();
-                result.user_agent = patch.user_agent.clone().or(result.user_agent);
-                result.with_proxy = patch.with_proxy.or(result.with_proxy);
-                result.self_proxy = patch.self_proxy.or(result.self_proxy);
-                result.danger_accept_invalid_certs =
-                    patch.danger_accept_invalid_certs.or(result.danger_accept_invalid_certs);
-                result.allow_auto_update = patch.allow_auto_update.or(result.allow_auto_update);
-                result.update_interval = patch.update_interval.or(result.update_interval);
-                result.timeout_seconds = patch.timeout_seconds.or(result.timeout_seconds);
-                result.merge = patch.merge.clone().or(result.merge);
-                result.script = patch.script.clone().or(result.script);
-                result.rules = patch.rules.clone().or(result.rules);
-                result.proxies = patch.proxies.clone().or(result.proxies);
-                result.groups = patch.groups.clone().or(result.groups);
-                Some(result)
-            }
+            (Some(base), Some(patch)) => Some(base.overlay(patch)),
             (Some(base), None) => Some(base.clone()),
             (None, Some(patch)) => Some(patch.clone()),
             (None, None) => None,
         }
     }
+
+    fn overlay(&self, patch: &Self) -> Self {
+        Self {
+            timeout_seconds: patch.timeout_seconds.or(self.timeout_seconds),
+            update_interval: patch.update_interval.or(self.update_interval),
+            with_proxy: patch.with_proxy.or(self.with_proxy),
+            self_proxy: patch.self_proxy.or(self.self_proxy),
+            allow_auto_update: patch.allow_auto_update.or(self.allow_auto_update),
+            danger_accept_invalid_certs: patch.danger_accept_invalid_certs.or(self.danger_accept_invalid_certs),
+            merge: prefer_patch(&self.merge, &patch.merge),
+            rules: prefer_patch(&self.rules, &patch.rules),
+            script: prefer_patch(&self.script, &patch.script),
+            groups: prefer_patch(&self.groups, &patch.groups),
+            proxies: prefer_patch(&self.proxies, &patch.proxies),
+        }
+    }
+}
+
+fn prefer_patch<T: Clone>(current: &Option<T>, patch: &Option<T>) -> Option<T> {
+    patch.as_ref().or(current.as_ref()).cloned()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,24 +140,24 @@ pub const GLOBAL_PROFILE_DEFAULTS: [GlobalProfileDefault; 2] = [
 ];
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct IProfiles {
+pub struct ProfileCatalog {
     pub current: Option<String>,
-    pub items: Option<Vec<PrfItem>>,
+    pub items: Option<Vec<ProfileEntry>>,
 }
 
-impl Default for IProfiles {
+impl Default for ProfileCatalog {
     fn default() -> Self {
         Self {
             current: None,
             items: Some(
                 GLOBAL_PROFILE_DEFAULTS
                     .iter()
-                    .map(|item| PrfItem {
+                    .map(|item| ProfileEntry {
                         uid: Some(item.uid.to_owned()),
                         itype: Some(item.itype.to_owned()),
                         name: Some(item.name.to_owned()),
                         file: Some(item.file.to_owned()),
-                        ..PrfItem::default()
+                        ..ProfileEntry::default()
                     })
                     .collect(),
             ),
@@ -184,7 +186,7 @@ pub struct RemoteProfileImport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub desc: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub option: Option<PrfOption>,
+    pub option: Option<RemoteProfileOptions>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,12 +194,12 @@ pub struct RemoteProfileDownload {
     pub url: String,
     pub file_data: String,
     pub name: String,
-    pub extra: Option<PrfExtra>,
+    pub extra: Option<SubscriptionUsage>,
     pub update_interval: Option<u64>,
     pub home: Option<String>,
 }
 
-impl IProfiles {
+impl ProfileCatalog {
     pub fn ensure_global_profile_items(&mut self) -> bool {
         let items = self.items.get_or_insert_with(Vec::new);
         let mut changed = false;
@@ -219,12 +221,12 @@ impl IProfiles {
                     changed = true;
                 }
             } else {
-                items.push(PrfItem {
+                items.push(ProfileEntry {
                     uid: Some(default.uid.to_owned()),
                     itype: Some(default.itype.to_owned()),
                     name: Some(default.name.to_owned()),
                     file: Some(default.file.to_owned()),
-                    ..PrfItem::default()
+                    ..ProfileEntry::default()
                 });
                 changed = true;
             }
@@ -262,11 +264,11 @@ impl IProfiles {
     }
 
     #[must_use]
-    pub const fn get_items(&self) -> Option<&Vec<PrfItem>> {
+    pub const fn get_items(&self) -> Option<&Vec<ProfileEntry>> {
         self.items.as_ref()
     }
 
-    pub fn get_item(&self, uid: impl AsRef<str>) -> Result<&PrfItem> {
+    pub fn get_item(&self, uid: impl AsRef<str>) -> Result<&ProfileEntry> {
         let uid = uid.as_ref();
         if let Some(item) = self
             .items
@@ -286,7 +288,7 @@ impl IProfiles {
         Ok(())
     }
 
-    pub fn append_metadata(&mut self, item: PrfItem) -> Result<()> {
+    pub fn append_metadata(&mut self, item: ProfileEntry) -> Result<()> {
         let Some(uid) = item.uid.as_deref() else {
             bail!("the uid should not be null");
         };
@@ -308,7 +310,7 @@ impl IProfiles {
         Ok(())
     }
 
-    pub fn patch_item(&mut self, uid: &str, patch: &PrfItem) -> Result<()> {
+    pub fn patch_item(&mut self, uid: &str, patch: &ProfileEntry) -> Result<()> {
         let items = self.items.get_or_insert_with(Vec::new);
         let Some(item) = items.iter_mut().find(|item| item.uid.as_deref() == Some(uid)) else {
             bail!("failed to find the profile item \"uid:{uid}\"");
@@ -339,7 +341,7 @@ impl IProfiles {
             item.updated = patch.updated;
         }
         if patch.option.is_some() {
-            item.option = PrfOption::merge(item.option.as_ref(), patch.option.as_ref());
+            item.option = RemoteProfileOptions::merge(item.option.as_ref(), patch.option.as_ref());
         }
         if patch.home.is_some() {
             item.home = patch.home.clone();
@@ -397,9 +399,11 @@ pub fn validate_remote_profile_yaml(file_data: &str) -> Result<()> {
         .as_mapping()
         .context("remote profile yaml root must be a mapping")?;
     if !mapping.contains_key("proxies") && !mapping.contains_key("proxy-providers") {
+        emit_remote_profile_debug(mapping);
         bail!("profile does not contain `proxies` or `proxy-providers`");
     }
     if !remote_profile_has_proxy_sources(mapping) {
+        emit_remote_profile_debug(mapping);
         bail!("profile does not contain any proxy or proxy-provider entries");
     }
     Ok(())
@@ -414,6 +418,101 @@ fn remote_profile_has_proxy_sources(mapping: &Mapping) -> bool {
             .get("proxy-providers")
             .and_then(Value::as_mapping)
             .is_some_and(|providers| !providers.is_empty())
+}
+
+fn emit_remote_profile_debug(mapping: &Mapping) {
+    if !remote_profile_debug_enabled() {
+        return;
+    }
+    eprintln!("remote profile debug: {}", remote_profile_debug_summary(mapping));
+}
+
+fn remote_profile_debug_enabled() -> bool {
+    std::env::var_os("CLASH_TUI_SUBSCRIPTION_DEBUG").is_some()
+        || std::env::var_os("CLASH_TUI_REMOTE_PROFILE_DEBUG").is_some()
+}
+
+fn remote_profile_debug_summary(mapping: &Mapping) -> String {
+    let top_keys = mapping
+        .keys()
+        .filter_map(Value::as_str)
+        .take(16)
+        .collect::<Vec<_>>()
+        .join(",");
+    let proxies = mapping_sequence_len(mapping, "proxies");
+    let proxy_providers = mapping_mapping_len(mapping, "proxy-providers");
+    let proxy_groups = mapping_sequence_len(mapping, "proxy-groups");
+    let rules = mapping_sequence_len(mapping, "rules");
+    let missing_refs = missing_proxy_group_refs(mapping);
+    let missing_refs = if missing_refs.is_empty() {
+        "none".to_owned()
+    } else {
+        missing_refs.into_iter().take(8).collect::<Vec<_>>().join(",")
+    };
+
+    format!(
+        "topKeys=[{top_keys}], proxies={}, proxyProviders={}, proxyGroups={}, rules={}, missingProxyRefs=[{missing_refs}]",
+        display_count(proxies),
+        display_count(proxy_providers),
+        display_count(proxy_groups),
+        display_count(rules)
+    )
+}
+
+fn display_count(count: Option<usize>) -> String {
+    count.map_or_else(|| "missing".to_owned(), |count| count.to_string())
+}
+
+fn mapping_sequence_len(mapping: &Mapping, key: &str) -> Option<usize> {
+    mapping.get(key).and_then(Value::as_sequence).map(Vec::len)
+}
+
+fn mapping_mapping_len(mapping: &Mapping, key: &str) -> Option<usize> {
+    mapping.get(key).and_then(Value::as_mapping).map(Mapping::len)
+}
+
+fn missing_proxy_group_refs(mapping: &Mapping) -> Vec<String> {
+    let mut known = BTreeSet::from([
+        "COMPATIBLE".to_owned(),
+        "DIRECT".to_owned(),
+        "GLOBAL".to_owned(),
+        "PASS".to_owned(),
+        "REJECT".to_owned(),
+        "REJECT-DROP".to_owned(),
+    ]);
+    if let Some(proxies) = mapping.get("proxies").and_then(Value::as_sequence) {
+        known.extend(proxies.iter().filter_map(proxy_entry_name));
+    }
+    if let Some(groups) = mapping.get("proxy-groups").and_then(Value::as_sequence) {
+        known.extend(groups.iter().filter_map(proxy_entry_name));
+    }
+
+    let mut missing = BTreeSet::new();
+    if let Some(groups) = mapping.get("proxy-groups").and_then(Value::as_sequence) {
+        for group in groups {
+            let Some(group) = group.as_mapping() else {
+                continue;
+            };
+            let Some(proxies) = group.get("proxies").and_then(Value::as_sequence) else {
+                continue;
+            };
+            for proxy in proxies.iter().filter_map(Value::as_str) {
+                if !known.contains(proxy) {
+                    missing.insert(proxy.to_owned());
+                }
+            }
+        }
+    }
+    missing.into_iter().collect()
+}
+
+fn proxy_entry_name(value: &Value) -> Option<String> {
+    value
+        .as_mapping()
+        .and_then(|mapping| mapping.get("name"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn normalize_remote_profile_data(file_data: &str) -> Result<String> {
@@ -454,27 +553,40 @@ pub async fn download_remote_profile(input: &RemoteProfileImport) -> Result<Remo
     }
     let client = builder.build().context("failed to build remote profile HTTP client")?;
 
-    let user_agent = option
-        .and_then(|option| option.user_agent.as_deref())
-        .filter(|user_agent| !user_agent.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(default_subscription_user_agent);
-    let request = client.get(url.clone()).header(reqwest::header::USER_AGENT, user_agent);
+    emit_remote_download_debug(
+        "request",
+        &format!(
+            "url={}, userAgent={}, mode={}, timeoutSecs={}",
+            redact_subscription_url(&url),
+            subscription_headers::DEFAULT_USER_AGENT,
+            remote_download_mode(option),
+            timeout.as_secs()
+        ),
+    );
+    let request = client
+        .get(url.clone())
+        .header(USER_AGENT, subscription_headers::DEFAULT_USER_AGENT);
 
     let response = request
         .send()
         .await
         .with_context(|| format!("failed to fetch remote profile: {url}"))?;
     let status = response.status();
+    emit_remote_download_debug(
+        "response",
+        &format!("status={status}, url={}", redact_subscription_url(&url)),
+    );
     if !status.is_success() {
         bail!("failed to fetch remote profile with status {status}");
     }
 
     let headers = response.headers().clone();
+    emit_remote_download_debug("headers", &remote_profile_headers_debug_summary(&headers));
     let file_data = response
         .text()
         .await
         .context("failed to read remote profile response")?;
+    emit_remote_download_debug("body", &remote_profile_body_debug_summary(&file_data));
     let file_data = normalize_remote_profile_data(&file_data)?;
 
     Ok(RemoteProfileDownload {
@@ -492,8 +604,93 @@ pub async fn download_remote_profile(input: &RemoteProfileImport) -> Result<Remo
             .as_ref()
             .and_then(|option| option.update_interval)
             .or_else(|| parse_update_interval(&headers)),
-        home: header_to_string(&headers, "profile-web-page-url"),
+        home: subscription_headers::header_text(&headers, subscription_headers::PROFILE_WEB_PAGE_URL),
     })
+}
+
+fn emit_remote_download_debug(event: &str, message: &str) {
+    if remote_profile_debug_enabled() {
+        eprintln!("remote profile debug: event={event}, {message}");
+    }
+}
+
+fn remote_download_mode(option: Option<&RemoteProfileOptions>) -> &'static str {
+    if option.is_some_and(|option| option.self_proxy.unwrap_or(false)) {
+        "clash-proxy"
+    } else if option.is_some_and(|option| option.with_proxy.unwrap_or(false)) {
+        "system-proxy"
+    } else {
+        "direct"
+    }
+}
+
+fn redact_subscription_url(_value: &str) -> String {
+    "[订阅链接]".to_owned()
+}
+
+fn remote_profile_headers_debug_summary(headers: &HeaderMap) -> String {
+    let content_type = headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<missing>");
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<missing>");
+    let userinfo = subscription_headers::subscription_userinfo_text(headers)
+        .map(subscription_userinfo_shape)
+        .unwrap_or_else(|| "missing".to_owned());
+    let update_interval = subscription_headers::header_text(headers, subscription_headers::PROFILE_UPDATE_INTERVAL)
+        .map(|_| "present")
+        .unwrap_or("missing");
+    let content_disposition = headers
+        .get(CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .map(|_| "present")
+        .unwrap_or("missing");
+    let home = subscription_headers::header_text(headers, subscription_headers::PROFILE_WEB_PAGE_URL)
+        .map(|value| if value.trim().is_empty() { "empty" } else { "present" })
+        .unwrap_or("missing");
+
+    format!(
+        "contentType={content_type}, contentLength={content_length}, subscriptionUserinfo={userinfo}, updateInterval={update_interval}, contentDisposition={content_disposition}, home={home}"
+    )
+}
+
+fn subscription_userinfo_shape(value: &str) -> String {
+    let keys = value
+        .split(';')
+        .filter_map(|part| part.trim().split_once('=').map(|(key, _)| key.trim()))
+        .filter(|key| !key.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
+    if keys.is_empty() {
+        "present".to_owned()
+    } else {
+        format!("keys=[{keys}]")
+    }
+}
+
+fn remote_profile_body_debug_summary(file_data: &str) -> String {
+    let bytes = file_data.len();
+    let trimmed = file_data.trim_start_matches('\u{feff}').trim_start();
+    let kind = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        "json-like"
+    } else if trimmed.starts_with('<') {
+        "html-like"
+    } else if trimmed.contains("://") {
+        "node-list-like"
+    } else {
+        "yaml-or-text"
+    };
+
+    match serde_yaml_ng::from_str::<Value>(trimmed)
+        .ok()
+        .and_then(|value| value.as_mapping().map(remote_profile_debug_summary))
+    {
+        Some(summary) => format!("bytes={bytes}, kind={kind}, {summary}"),
+        None => format!("bytes={bytes}, kind={kind}, yamlMapping=false"),
+    }
 }
 
 #[must_use]
@@ -1782,25 +1979,14 @@ fn normalize_remote_url(raw: &str) -> Result<String> {
     Ok(url.into())
 }
 
-fn parse_subscription_userinfo(headers: &HeaderMap) -> Option<PrfExtra> {
-    for (key, value) in headers {
-        let key = key.as_str().to_ascii_lowercase();
-        if !key
-            .strip_suffix("subscription-userinfo")
-            .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('-'))
-        {
-            continue;
-        }
-
-        let value = value.to_str().ok()?;
-        return Some(PrfExtra {
-            upload: parse_header_param(value, "upload").unwrap_or(0),
-            download: parse_header_param(value, "download").unwrap_or(0),
-            total: parse_header_param(value, "total").unwrap_or(0),
-            expire: parse_header_param(value, "expire").unwrap_or(0),
-        });
-    }
-    None
+fn parse_subscription_userinfo(headers: &HeaderMap) -> Option<SubscriptionUsage> {
+    let value = subscription_headers::subscription_userinfo_text(headers)?;
+    Some(SubscriptionUsage {
+        upload: parse_header_param(value, subscription_headers::PARAM_UPLOAD).unwrap_or(0),
+        download: parse_header_param(value, subscription_headers::PARAM_DOWNLOAD).unwrap_or(0),
+        total: parse_header_param(value, subscription_headers::PARAM_TOTAL).unwrap_or(0),
+        expire: parse_header_param(value, subscription_headers::PARAM_EXPIRE).unwrap_or(0),
+    })
 }
 
 fn parse_header_param<T>(value: &str, key: &str) -> Option<T>
@@ -1814,7 +2000,7 @@ where
 }
 
 fn parse_update_interval(headers: &HeaderMap) -> Option<u64> {
-    header_to_string(headers, "profile-update-interval")?
+    subscription_headers::header_text(headers, subscription_headers::PROFILE_UPDATE_INTERVAL)?
         .parse::<u64>()
         .ok()
         .map(|hours| hours * 60)
@@ -1827,10 +2013,6 @@ fn content_disposition_filename(headers: &HeaderMap) -> Option<String> {
         .or_else(|| parse_header_param::<String>(value, "filename").and_then(|name| clean_header_filename(&name)))
 }
 
-fn default_subscription_user_agent() -> String {
-    "clash-verge/v2.5.1".to_owned()
-}
-
 fn decode_rfc5987_filename(value: &str) -> Option<String> {
     let value = value.trim().trim_matches('"');
     let encoded = value.split_once("''").map_or(value, |(_, encoded)| encoded);
@@ -1840,14 +2022,6 @@ fn decode_rfc5987_filename(value: &str) -> Option<String> {
 fn clean_header_filename(value: &str) -> Option<String> {
     let value = value.trim().trim_matches('"').trim();
     (!value.is_empty()).then(|| value.to_owned())
-}
-
-fn header_to_string(headers: &HeaderMap, key: &str) -> Option<String> {
-    headers
-        .get(key)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 fn url_last_segment(url: &str) -> Option<String> {
@@ -1863,9 +2037,10 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        IProfiles, PrfItem, PrfOption, RemoteProfileImport, content_disposition_filename, download_remote_profile,
-        normalize_remote_profile_data, parse_subscription_userinfo, remote_profile_name_override_for_update,
-        validate_profile_uid, validate_profile_yaml, validate_remote_profile_yaml,
+        ProfileCatalog, ProfileEntry, RemoteProfileImport, content_disposition_filename, download_remote_profile,
+        normalize_remote_profile_data, parse_subscription_userinfo, remote_profile_debug_summary,
+        remote_profile_name_override_for_update, subscription_headers, validate_profile_uid, validate_profile_yaml,
+        validate_remote_profile_yaml,
     };
     use anyhow::Result;
     use base64::{
@@ -1880,13 +2055,13 @@ mod tests {
 
     #[test]
     fn append_first_usable_profile_sets_current() {
-        let mut profiles = IProfiles::default();
+        let mut profiles = ProfileCatalog::default();
         profiles
-            .append_metadata(PrfItem {
+            .append_metadata(ProfileEntry {
                 uid: Some("R123".into()),
                 itype: Some("remote".into()),
                 name: Some("Remote".into()),
-                ..PrfItem::default()
+                ..ProfileEntry::default()
             })
             .expect("append profile");
 
@@ -1918,6 +2093,31 @@ mod tests {
         assert!(validate_remote_profile_yaml("proxies: []\nrules: []\n").is_err());
         assert!(validate_remote_profile_yaml("proxy-providers: {}\nrules: []\n").is_err());
         assert!(validate_remote_profile_yaml("rules: []\n").is_err());
+    }
+
+    #[test]
+    fn remote_profile_debug_summary_reports_empty_sources_and_missing_group_refs() {
+        let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            r"
+proxies: []
+proxy-groups:
+  - name: missblog
+    type: select
+    proxies:
+      - 自动选择
+      - 故障转移
+rules:
+  - MATCH,missblog
+",
+        )
+        .expect("parse debug fixture");
+        let summary = remote_profile_debug_summary(value.as_mapping().expect("mapping"));
+
+        assert!(summary.contains("proxies=0"));
+        assert!(summary.contains("proxyGroups=1"));
+        assert!(summary.contains("rules=1"));
+        assert!(summary.contains("自动选择"));
+        assert!(summary.contains("故障转移"));
     }
 
     #[test]
@@ -2042,6 +2242,23 @@ mod tests {
     }
 
     #[test]
+    fn prefixed_subscription_userinfo_header_is_parsed() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "profile-subscription-userinfo",
+            "upload=11; download=22; total=33; expire=44"
+                .parse()
+                .expect("header value"),
+        );
+        let extra = parse_subscription_userinfo(&headers).expect("extra");
+
+        assert_eq!(extra.upload, 11);
+        assert_eq!(extra.download, 22);
+        assert_eq!(extra.total, 33);
+        assert_eq!(extra.expire, 44);
+    }
+
+    #[test]
     fn content_disposition_filename_star_is_decoded() {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -2079,7 +2296,7 @@ mod tests {
             let read = stream.read(&mut buffer).await?;
             let request = String::from_utf8_lossy(&buffer[..read]);
             assert!(request.starts_with("GET /sub.yaml HTTP/1.1"));
-            assert!(request.contains("user-agent: clash-verge/v2.5.1"));
+            assert!(request.contains(&format!("user-agent: {}", subscription_headers::DEFAULT_USER_AGENT)));
             let body = "proxies:\n  - name: direct\n    type: direct\nrules: []\n";
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nsubscription-userinfo: upload=1; download=2; total=3; expire=4\r\nprofile-update-interval: 6\r\nprofile-web-page-url: https://example.test\r\ncontent-disposition: attachment; filename*=UTF-8''remote%20profile.yaml\r\n\r\n{}",
@@ -2103,39 +2320,6 @@ mod tests {
         assert_eq!(download.update_interval, Some(360));
         assert_eq!(download.home.as_deref(), Some("https://example.test"));
         assert_eq!(download.extra.expect("extra").total, 3);
-        server.await??;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn remote_profile_download_prefers_custom_user_agent() -> Result<()> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let addr = listener.local_addr()?;
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await?;
-            let mut buffer = vec![0; 2048];
-            let read = stream.read(&mut buffer).await?;
-            let request = String::from_utf8_lossy(&buffer[..read]);
-            assert!(request.contains("user-agent: test-agent/1"));
-            assert!(!request.contains("user-agent: clash-verge/v2.5.1"));
-            let body = "proxies:\n  - name: direct\n    type: direct\nrules: []\n";
-            let response = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}", body.len(), body);
-            stream.write_all(response.as_bytes()).await?;
-            Ok::<(), anyhow::Error>(())
-        });
-
-        download_remote_profile(&RemoteProfileImport {
-            url: format!("http://{addr}/sub.yaml"),
-            uid: None,
-            name: None,
-            desc: None,
-            option: Some(PrfOption {
-                user_agent: Some("test-agent/1".into()),
-                ..PrfOption::default()
-            }),
-        })
-        .await?;
-
         server.await??;
         Ok(())
     }
